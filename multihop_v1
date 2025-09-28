@@ -1,0 +1,192 @@
+#Consilidated final
+from typing import List, Optional, Dict, Tuple
+from dataclasses import dataclass
+import numpy as np
+import json
+
+from google.cloud import bigquery, bigquery_storage
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
+
+# --- CONFIGURATION ---
+PROJECT_ID = "your-project-id"
+BQ_CUI_TABLE = "your_dataset.your_cui_embedding_table"
+GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
+vertexai.init(project=PROJECT_ID, location="us-central1")
+
+# =========================
+# --- Utility Functions ---
+# =========================
+
+def gemini_embed_single(text: str) -> np.ndarray:
+    model = TextEmbeddingModel.from_pretrained(GEMINI_EMBEDDING_MODEL)
+    embedding = model.get_embeddings([text])[0]
+    return np.array(embedding.values, dtype=np.float32)
+
+def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    a_norm = np.linalg.norm(a) + 1e-8
+    b_norm = np.linalg.norm(b) + 1e-8
+    return float(np.dot(a, b) / (a_norm * b_norm))
+
+def fetch_cui_embeddings(project_id: str, table_fqn: str, cuis: List[str]) -> Dict[str, np.ndarray]:
+    bq_client = bigquery.Client(project=project_id)
+    bqs_client = bigquery_storage.BigQueryReadClient()
+
+    if not cuis:
+        return {}
+
+    formatted_cuis = ','.join([f"'{cui}'" for cui in cuis])
+    query = f"""
+        SELECT REF_cui, REF_Embedding
+        FROM `{table_fqn}`
+        WHERE REF_cui IN ({formatted_cuis})
+    """
+    query_job = bq_client.query(query)
+    df = query_job.result().to_dataframe(bqstorage_client=bqs_client)
+
+    embeddings = {}
+    for _, row in df.iterrows():
+        embeddings[row["REF_cui"]] = np.array(row["REF_Embedding"], dtype=np.float32).ravel()
+
+    return embeddings
+
+# =====================
+# --- DocAI Parsing ---
+# =====================
+
+def load_docai_json(response_content: str) -> Tuple[str, List[dict]]:
+    doc = json.loads(response_content)
+    output = doc.get("output", {})
+    full_text = output.get("text", "")
+    pages = output.get("pages", [])
+    return full_text, pages
+
+def extract_text_from_anchor_with_context(text_anchor: Dict, full_text: str) -> str:
+    if not text_anchor or "textSegments" not in text_anchor:
+        return ""
+    segments = text_anchor["textSegments"]
+    texts = []
+    for segment in segments:
+        start = int(segment.get("startIndex", 0))
+        end = int(segment.get("endIndex", 0))
+        if start >= end or end > len(full_text):
+            continue
+        texts.append(full_text[start:end])
+    return " ".join(texts).strip()
+
+def merge_text_from_docai_blocks(full_text: str, pages: List[dict]) -> List[str]:
+    merged_texts = []
+    for page in pages:
+        for block in page.get("blocks", []):
+            anchor = block.get("layout", {}).get("textAnchor", {})
+            block_text = extract_text_from_anchor_with_context(anchor, full_text)
+            if block_text:
+                merged_texts.append(block_text)
+    return merged_texts
+
+# =====================
+# --- Embedding Flow ---
+# =====================
+
+@dataclass
+class Entity:
+    entity_id: str
+    text: str
+    cui: Optional[str] = None
+    emb: Optional[np.ndarray] = None
+    sim_to_query: Optional[float] = None
+
+def entities_from_docai_blocks(merged_texts: List[str]) -> List[Entity]:
+    return [Entity(entity_id=str(i), text=text) for i, text in enumerate(merged_texts)]
+
+def attach_embeddings(entities: List[Entity], project_id: str, cui_table: str):
+    unique_cuis = list({e.cui for e in entities if e.cui})
+    cui_embeddings = fetch_cui_embeddings(project_id, cui_table, unique_cuis)
+
+    for e in entities:
+        if e.cui and e.cui in cui_embeddings:
+            e.emb = cui_embeddings[e.cui]
+        else:
+            e.emb = gemini_embed_single(e.text)
+
+def compute_query_similarities(entities: List[Entity], query_emb: np.ndarray):
+    for e in entities:
+        if e.emb is not None:
+            e.sim_to_query = cosine_sim(query_emb, e.emb)
+
+def multihop_from_root(root_entity: Entity, entities: List[Entity], num_neighbors: int = 4) -> List[Entity]:
+    neighbors = []
+    for e in entities:
+        if e.entity_id == root_entity.entity_id or e.emb is None:
+            continue
+        sim = cosine_sim(root_entity.emb, e.emb)
+        neighbors.append((e, sim))
+    neighbors.sort(key=lambda x: x[1], reverse=True)
+    return [e for e, _ in neighbors[:num_neighbors]]
+
+# =====================================
+# --- Unified End-to-End Pipeline -----
+# =====================================
+
+def run_docai_embedding_pipeline(
+    response_content: str,
+    query_text: str,
+    project_id: str,
+    cui_table: str
+) -> List[Entity]:
+    # Step 1: Parse DocAI response
+    full_text, pages = load_docai_json(response_content)
+    merged_texts = merge_text_from_docai_blocks(full_text, pages)
+
+    # Step 2: Create Entity objects
+    entities = entities_from_docai_blocks(merged_texts)
+
+    # Step 3: Attach embeddings
+    attach_embeddings(entities, project_id, cui_table)
+
+    # Step 4: Embed the query and compute similarity
+    query_emb = gemini_embed_single(query_text)
+    compute_query_similarities(entities, query_emb)
+
+    # Step 5: Rank and multihop
+    query_sorted = sorted([e for e in entities if e.sim_to_query is not None], key=lambda x: x.sim_to_query, reverse=True)
+    if not query_sorted:
+        return []
+
+    root = query_sorted[0]
+    direct_4 = query_sorted[1:5]
+    multihop_4 = multihop_from_root(root, entities, num_neighbors=4)
+
+    combined = {e.entity_id: e for e in direct_4 + multihop_4}
+    final_4 = sorted(combined.values(), key=lambda x: x.sim_to_query or 0, reverse=True)[:4]
+
+    return [root] + final_4
+
+# ====================
+# --- Usage Sample ---
+# ====================
+
+# Example usage:
+response_content = response.content.decode("utf-8")  # from requests or HTTP call
+query = input("Enter your search query: ").strip()
+
+results = run_docai_embedding_pipeline(response_content, query, PROJECT_ID, BQ_CUI_TABLE)
+
+for idx, e in enumerate(results, 1):
+    print(f"[{idx}] {e.text.replace(chr(10), ' ').strip()} (CUI: {e.cui})")
+    
+# --- Save results as JSON (not printed) ---
+final_output = [
+    {
+        "entity_id": e.entity_id,
+        "text": e.text,
+        "cui": e.cui,
+        "embedding": e.emb.tolist() if e.emb is not None else None,
+        "similarity_to_query": e.sim_to_query
+    }
+    for e in results
+]
+
+# Save to file (no printing)
+with open("final_entities.json", "w", encoding="utf-8") as f:
+    json.dump(final_output, f, indent=2)
