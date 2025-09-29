@@ -1,0 +1,18 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'REGION-docker.pkg.dev/PROJECT_ID/docai-repo/docai-api', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'REGION-docker.pkg.dev/PROJECT_ID/docai-repo/docai-api']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      [
+        'run', 'deploy', 'docai-api',
+        '--image', 'REGION-docker.pkg.dev/PROJECT_ID/docai-repo/docai-api',
+        '--region', 'REGION',
+        '--platform', 'managed',
+        '--no-allow-unauthenticated',
+        '--service-account', 'SERVICE_ACCOUNT_EMAIL'
+      ]
