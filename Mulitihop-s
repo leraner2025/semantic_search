@@ -1,141 +1,6 @@
+import subprocess
+import requests
 import json
-
-response_content = response.content.decode("utf-8")
-docai = json.loads(response_content)
-
-import json
-
-def load_docai_json(response_content):
-    doc = json.loads(response_content)
-    output = doc.get("output", {})
-    full_text = output.get("text", "")
-    pages = output.get("pages", [])
-    return full_text, pages
-
-full_text, pages = load_docai_json(response_content)
-
-def explore_docai_structure(full_text, pages):
-    for page_num, page in enumerate(pages):
-        print(f"\n--- Page {page_num + 1} ---")
-        for block_idx, block in enumerate(page.get("blocks", [])):
-            layout = block.get("layout", {})
-            anchor = layout.get("textAnchor", {})
-            vertices = layout.get("boundingPoly", {}).get("vertices", [])
-            block_text = extract_text_from_anchor_with_context(anchor, full_text).strip()
-
-            print(f"\n[Block {block_idx}]")
-            print(f"Text: {block_text}")
-            print(f"Text Anchor: {anchor}")
-            print(f"Bounding Poly: {vertices}")
-
-def extract_text_from_anchor_with_context(text_anchor, full_text, window=0):
-    if not text_anchor or "textSegments" not in text_anchor:
-        return ""
-    
-    segments = text_anchor.get("textSegments", [])
-    if not segments:
-        return ""
-
-    texts = []
-    for segment in segments:
-        start = int(segment.get("startIndex", 0))
-        end = int(segment.get("endIndex", 0))
-        if start >= end or end > len(full_text):
-            continue
-        texts.append(full_text[start:end])
-    return " ".join(texts).strip()
-
-explore_docai_structure(full_text, pages)
-
-def merge_text_from_docai_blocks(full_text, pages):
-    merged_texts = []
-    for page in pages:
-        for block in page.get("blocks", []):
-            layout = block.get("layout", {})
-            anchor = layout.get("textAnchor", {})
-            block_text = extract_text_from_anchor_with_context(anchor, full_text)
-            block_text = block_text.strip()
-            if block_text:
-                merged_texts.append(block_text)
-    return merged_texts
-
-def print_merged_docai_text(full_text, pages):
-    merged_chunks = merge_text_from_docai_blocks(full_text, pages)
-    if not merged_chunks:
-        print("No text found in blocks.")
-    else:
-        print("=== Merged Text from DocAI Blocks ===")
-        for idx, chunk in enumerate(merged_chunks):
-            print(f"[Block {idx + 1}]:")
-            print(chunk)
-            print("-----------------------")
-
-# Then just call:
-print_merged_docai_text(full_text, pages)
-# print(full_text)
-
-
-#sample output
-=== Merged Text from DocAI Blocks ===
-[Block 1]:
-09/06/2023 12:45:14 PM CLOUDFAX
------------------------
-[Block 2]:
-Disney Land Health System
-Savannah, Georgia
------------------------
-[Block 3]:
-Patient: Mouse, Mini
-DOB: 09/30/1952
-Age/Sex: 70/F
------------------------
-[Block 4]:
-Loc: C DS
------------------------
-[Block 5]:
-Attending Dr: Donald Duck MD
------------------------
-[Block 6]:
-Initialization Date/Time: 10/10/22,1106
------------------------
-[Block 7]:
-Operative Note
------------------------
-[Block 8]:
-Operative Note
-Operative Note:
------------------------
-[Block 9]:
-Pre-Op Diagnosis:
------------------------
-[Block 10]:
-1. Left Breast Invasive Ductal Cancer
------------------------
-[Block 11]:
-Post-Op Diagnosis:
------------------------
-[Block 12]:
-Same
------------------------
-[Block 13]:
-Operative Note
-Signed
------------------------
-[Block 14]:
-PAGE 11
------------------------
-[Block 15]:
-OF 93
------------------------
-[Block 16]:
-MR#: F29
-Acct.J0 45
------------------------
-[Block 17]:
-ADM Date:
-10/10/22
------------------------
-#end of output
 
 import os
 import re
@@ -149,43 +14,74 @@ import vertexai
 from vertexai.language_models import TextEmbeddingModel
 from google.cloud import bigquery
 from google.cloud import bigquery_storage
+ 
+tmp = subprocess.run(['gcloud', 'auth', 'print-identity-token'], stdout=subprocess.PIPE, universal_newlines=True)
+token = str(tmp.stdout).strip()
+ 
+# Set the headers including the Authorization and Content-Type
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json"
+}
+ 
+data = {
+"gcs_uri": "gs:12345.pdf",
+    "individual_pages": [2]
+}
+ 
+# Send the POST request with the payload
+response = requests.post("https://6789", headers=headers, json=data)
 
-# --- CONFIG ---
+response_content = response.content.decode("utf-8")
+docai = json.loads(response_content)
+
+
+PROJECT_ID = "x1245"
+LOCATION = "us-centr"
+BQ_CUI_TABLE = "test_query"
+
+
+# Consolidated Final
+from typing import List, Optional, Dict, Tuple
+from dataclasses import dataclass
+import numpy as np
+import json
+
+from google.cloud import bigquery, bigquery_storage
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
+
+# CONFIG
 PROJECT_ID = PROJECT_ID
 LOCATION = LOCATION
 BQ_CUI_TABLE = BQ_CUI_TABLE
 
-# --- Initialize Vertex AI ---
+# Initialize Vertex AI
 vertexai.init(project=PROJECT_ID, location=LOCATION)
 GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
 
-# --- Embedding function ---
+# Load embedding model once globally
+embedding_model = TextEmbeddingModel.from_pretrained(GEMINI_EMBEDDING_MODEL)
+
+
+# Utility Functions
+
 def gemini_embed_single(text: str) -> np.ndarray:
-    model = TextEmbeddingModel.from_pretrained(GEMINI_EMBEDDING_MODEL)
-    embedding = model.get_embeddings([text])[0]
+    embedding = embedding_model.get_embeddings([text])[0]
     return np.array(embedding.values, dtype=np.float32)
 
-# --- Cosine similarity ---
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     a_norm = np.linalg.norm(a) + 1e-8
     b_norm = np.linalg.norm(b) + 1e-8
     return float(np.dot(a, b) / (a_norm * b_norm))
 
-# --- BigQuery CUI Embedding Fetch ---
-def fetch_cui_embeddings(project_id: str, table_fqn: str, cuis: List[str]) -> Dict[str, np.ndarray]:
-    print(f"Fetching embeddings for CUIs: {cuis}")
+def fetch_all_cui_embeddings(project_id: str, table_fqn: str) -> Dict[str, np.ndarray]:
     bq_client = bigquery.Client(project=project_id)
     bqs_client = bigquery_storage.BigQueryReadClient()
-
-    if not cuis:
-        print("No CUIs provided to fetch embeddings.")
-        return {}
-
-    formatted_cuis = ','.join([f"'{cui}'" for cui in cuis])
+    
     query = f"""
         SELECT REF_cui, REF_Embedding
         FROM `{table_fqn}`
-        WHERE REF_cui IN ({formatted_cuis})
     """
     query_job = bq_client.query(query)
     df = query_job.result().to_dataframe(bqstorage_client=bqs_client)
@@ -193,146 +89,188 @@ def fetch_cui_embeddings(project_id: str, table_fqn: str, cuis: List[str]) -> Di
     embeddings = {}
     for _, row in df.iterrows():
         embeddings[row["REF_cui"]] = np.array(row["REF_Embedding"], dtype=np.float32).ravel()
-
-    print(f"Fetched embeddings for CUIs: {list(embeddings.keys())}")
     return embeddings
 
-# --- Entity dataclass ---
+
+# DocAI Parsing
+
+def load_docai_json(response_content: str) -> Tuple[str, List[dict]]:
+    doc = json.loads(response_content)
+    output = doc.get("output", {})
+    full_text = output.get("text", "")
+    pages = output.get("pages", [])
+    return full_text, pages
+
+def extract_text_from_anchor_with_context(text_anchor: Dict, full_text: str) -> str:
+    if not text_anchor or "textSegments" not in text_anchor:
+        return ""
+    segments = text_anchor["textSegments"]
+    texts = []
+    for segment in segments:
+        start = int(segment.get("startIndex", 0))
+        end = int(segment.get("endIndex", 0))
+        if start >= end or end > len(full_text):
+            continue
+        texts.append(full_text[start:end])
+    return " ".join(texts).strip()
+
+def merge_text_from_docai_blocks(full_text: str, pages: List[dict]) -> List[str]:
+    merged_texts = []
+    for page in pages:
+        for block in page.get("blocks", []):
+            layout = block.get("layout", {})
+            anchor = layout.get("textAnchor", {})
+            block_text = extract_text_from_anchor_with_context(anchor, full_text) 
+            
+            # Removed unused vars for clarity:
+            # para_type = layout.get("detectedLanguages", [{}])[0].get("languageCode", "")
+            # block_type = block.get("detectedBreakType", "")
+
+            header = block.get("sectionHeader", {}).get("text", "")
+            if header and header not in block_text:
+                block_text = f"{header}\n{block_text}"
+            if block_text:
+                merged_texts.append(block_text)
+    return merged_texts
+
+
+# Embedding Flow
+
 @dataclass
 class Entity:
     entity_id: str
     text: str
-    cui: Optional[str] = None
     emb: Optional[np.ndarray] = None
+    sim_to_query: Optional[float] = None
+    top_cuis: Optional[List[Tuple[str, float]]] = None  # [(CUI, score)]
 
-# --- Parse entities from internal NER response ---
-def parse_entities_from_ner_response(phrases_json) -> List[Entity]:
-    entities = []
+    @property
+    def cui(self):
+        # Return top CUI for backward compatibility
+        return self.top_cuis[0][0] if self.top_cuis else None
 
-    for ent_id, ent_val in phrases_json.items():
-        if not isinstance(ent_val, dict):
+def entities_from_docai_blocks(merged_texts: List[str]) -> List[Entity]:
+    return [Entity(entity_id=str(i), text=text) for i, text in enumerate(merged_texts)]
+
+def assign_best_matching_cui(entities, cui_embeddings, top_n=3, min_sim: float = 0.6):
+    for entity in entities:
+        if entity.emb is None:
             continue
+        scores = []
+        for cui, cui_emb in cui_embeddings.items():
+            score = cosine_sim(entity.emb, cui_emb)
+            if score >= min_sim:  # Filter low-sim CUIs
+                scores.append((cui, score))
+        top_matches = sorted(scores, key=lambda x: x[1], reverse=True)[:top_n]
+        entity.top_cuis = top_matches if top_matches else None
 
-        # Extract text safely
-        text_list = ent_val.get("text", [])
-        text = " ".join(str(t) for t in text_list if isinstance(t, str)) if text_list else ""
-
-        mappings = ent_val.get("mappings", {})
-        cuis = set()
-
-        for mapping in mappings.values():
-            candidates = mapping.get("candidates", {})
-            if isinstance(candidates, dict):
-                for candidate in candidates.values():
-                    cui = candidate.get("cui")
-                    if cui:
-                        cuis.add(cui)
-
-        if cuis:
-            for idx, cui in enumerate(cuis):
-                entity_id = f"{ent_id}_{idx}"
-                entities.append(Entity(entity_id=entity_id, text=text, cui=cui))
-        else:
-            entities.append(Entity(entity_id=ent_id, text=text, cui=None))
-
-    print(f"Parsed {len(entities)} entities. Extracted CUIs: {[e.cui for e in entities]}")
-    return entities
-
-# --- Attach embeddings to entities ---
-def attach_embeddings(entities: List[Entity], project_id: str, cui_table: str):
-    unique_cuis = list({e.cui for e in entities if e.cui})
-    print(f"Unique CUIs to fetch embeddings for: {unique_cuis}")
-
-    cui_embeddings = fetch_cui_embeddings(project_id, cui_table, unique_cuis)
-
-    for e in entities:
-        if e.cui and e.cui in cui_embeddings:
-            e.emb = cui_embeddings[e.cui]
-            print(f"Entity {e.entity_id} assigned embedding from CUI {e.cui}")
-        else:
-            e.emb = gemini_embed_single(e.text)
-            print(f"Entity {e.entity_id} assigned embedding from text fallback")
-
-# --- Query embedding and matching ---
-def query_match(query_text: str, entities: List[Entity], top_k: int = 5) -> List[Dict]:
+def attach_embeddings(
+    entities: List[Entity],
+    project_id: str,
+    cui_table: str,
+    query_text: str,
+    top_k_cuis: int = 100,
+):
     query_emb = gemini_embed_single(query_text)
-    print(f"Generated embedding for query: '{query_text}'")
 
-    scored = []
     for e in entities:
-        if e.emb is None:
+        e.emb = gemini_embed_single(e.text)
+
+    cui_embeddings = fetch_all_cui_embeddings(project_id, cui_table)
+
+    # Pre-filter CUIs using query similarity
+    cui_scores = {
+        cui: cosine_sim(query_emb, emb)
+        for cui, emb in cui_embeddings.items()
+    }
+    top_cuis = sorted(cui_scores.items(), key=lambda x: x[1], reverse=True)[:top_k_cuis]
+    filtered_cui_embeddings = {cui: cui_embeddings[cui] for cui, _ in top_cuis}
+
+    # print(f"[INFO] Using top {top_k_cuis} CUIs (filtered from {len(cui_embeddings)})")
+
+    assign_best_matching_cui(entities, filtered_cui_embeddings, top_n=3)
+    
+def compute_query_similarities(entities: List[Entity], query_emb: np.ndarray, query_text: str):
+    for e in entities:
+        if e.emb is not None:
+            sim = cosine_sim(query_emb, e.emb)
+            # Boost if block contains query term literally (lightly)
+            if query_text.lower() in e.text.lower():
+                sim += 0.05  # Boost by small amount
+            e.sim_to_query = sim
+
+def multihop_from_root(root_entity: Entity, entities: List[Entity], num_neighbors: int = 4) -> List[Entity]:
+    neighbors = []
+    for e in entities:
+        if e.entity_id == root_entity.entity_id or e.emb is None:
             continue
-        score = cosine_sim(query_emb, e.emb)
-        scored.append((e, score))
+        sim = cosine_sim(root_entity.emb, e.emb)
+        neighbors.append((e, sim))
+    neighbors.sort(key=lambda x: x[1], reverse=True)
+    return [e for e, _ in neighbors[:num_neighbors]]
 
-    scored.sort(key=lambda x: x[1], reverse=True)
 
-    results = []
-    for e, score in scored[:top_k]:
-        results.append({
-            "entity_id": e.entity_id,
-            "text": e.text,
-            "cui": e.cui,
-            "score": round(score, 4)
-        })
-    print(f"Top {top_k} matches: {results}")
-    return results
+# End-to-End Pipeline
 
-# --- Example usage ---
-try:
-    ner_json = response2.json()
-except json.JSONDecodeError:
-    print("NER response is not JSON:", response2.text)
-    ner_json = {}
+def run_docai_embedding_pipeline(
+    response_content: str,
+    query_text: str,
+    project_id: str,
+    cui_table: str
+) -> List[Entity]:
+    full_text, pages = load_docai_json(response_content)
+    merged_texts = merge_text_from_docai_blocks(full_text, pages)
 
-phrases = {}
-try:
-    phrases = (
-        ner_json["output"]["0"]["utterances"]["0"]["phrases"]
+    entities = entities_from_docai_blocks(merged_texts)
+
+    attach_embeddings(entities, project_id, cui_table, query_text=query_text)
+
+    query_emb = gemini_embed_single(query_text)
+    compute_query_similarities(entities, query_emb, query_text)
+
+    query_sorted = sorted(
+        [e for e in entities if e.sim_to_query is not None],
+        key=lambda x: x.sim_to_query, reverse=True
     )
-except (KeyError, TypeError) as e:
-    print("Failed to extract phrases:", str(e))
-print(f"Phrases keys: {list(phrases.keys())}")
-# Step 2: Extract all phrases from all utterances
-phrases = {}
+    if not query_sorted:
+        return []
 
-try:
-    output = ner_json.get("output", {})
-    for out_val in output.values():  # e.g., output["0"], output["1"], ...
-        if not isinstance(out_val, dict):
-            continue
-        utterances = out_val.get("utterances", {})
-        for utt_val in utterances.values():  # e.g., utterances["0"]
-            if isinstance(utt_val, dict) and "phrases" in utt_val:
-                phrases.update(utt_val["phrases"])
-except Exception as e:
-    print("Failed to extract phrases from NER JSON:", e)
+    root = query_sorted[0]
+    direct_4 = query_sorted[1:5]
+    multihop_4 = multihop_from_root(root, entities, num_neighbors=4)
 
-print(f"Phrases keys: {list(phrases.keys())}")
+    combined = {e.entity_id: e for e in direct_4 + multihop_4}
+    final_4 = sorted(combined.values(), key=lambda x: x.sim_to_query or 0, reverse=True)[:4]
 
-# Step 3: Parse entities from phrases
-entities = parse_entities_from_ner_response(phrases) or []
-
-attach_embeddings(entities, PROJECT_ID, BQ_CUI_TABLE)
+    return [root] + final_4
 
 
-# Step 4: Query example
-query = "admission"
-matches = query_match(query, entities)
+# Sample usage (make sure you set response_content and PROJECT_ID, BQ_CUI_TABLE accordingly)
 
-print("Top matches for query:", matches)
+response_content = response.content.decode("utf-8")  # from requests or HTTP call
+query = input("Enter your search query: ").strip()
+results = run_docai_embedding_pipeline(response_content, query, PROJECT_ID, BQ_CUI_TABLE)
 
-# After extracting phrases and parsing entities
-print(f"Phrases keys: {list(phrases.keys())}")
+for idx, e in enumerate(results, 1):
+    print(f"[{idx}] {e.text.replace(chr(10), ' ').strip()}")
+    if e.top_cuis:
+        cuis = [cui for cui, _ in e.top_cuis]
+        print("Top CUIs: " + ", ".join(cuis))
+    else:
+        print("Top CUIs: None")
+    print()
 
-entities = parse_entities_from_ner_response(phrases) or []
+# Save results as JSON (not printed)
+final_output = [
+    {
+        "entity_id": e.entity_id,
+        "text": e.text,
+        "top_cuis": [{"cui": cui, "score": score} for cui, score in (e.top_cuis or [])],
+        "embedding": e.emb.tolist() if e.emb is not None else None,
+        "similarity_to_query": e.sim_to_query
+    }
+    for e in results
+]
 
-print(f"Parsed {len(entities)} entities:")
-for e in entities:
-    print(f"Entity ID: {e.entity_id}, Text: '{e.text}', CUI: {e.cui}")
-
-#sample output
-Entity ID: 0_0, Text: 'Health information Management Rpt', CUI: C3494384
-Entity ID: 1, Text: ':', CUI: None
-Entity ID: 2_0, Text: '1010-00867 Operative Note', CUI: C0551628
-#end of sample output
+with open("final_entities.json", "w", encoding="utf-8") as f:
+    json.dump(final_output, f, indent=2)
