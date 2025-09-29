@@ -1,23 +1,15 @@
-# models.py
-
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 import numpy as np
-import vertexai
-from vertexai.language_models import TextEmbeddingModel
 
-# Initialize Vertex AI once
-PROJECT_ID = "x1245"
-LOCATION = "us-centr"
-vertexai.init(project=PROJECT_ID, location=LOCATION)
+@dataclass
+class Entity:
+    entity_id: str
+    text: str
+    emb: Optional[np.ndarray] = None
+    sim_to_query: Optional[float] = None
+    top_cuis: Optional[List[Tuple[str, float]]] = None
 
-# Load embedding model globally
-GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
-embedding_model = TextEmbeddingModel.from_pretrained(GEMINI_EMBEDDING_MODEL)
-
-def gemini_embed_single(text: str) -> np.ndarray:
-    embedding = embedding_model.get_embeddings([text])[0]
-    return np.array(embedding.values, dtype=np.float32)
-
-def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-    a_norm = np.linalg.norm(a) + 1e-8
-    b_norm = np.linalg.norm(b) + 1e-8
-    return float(np.dot(a, b) / (a_norm * b_norm))
+    @property
+    def cui(self):
+        return self.top_cuis[0][0] if self.top_cuis else None
