@@ -16,4 +16,5 @@ steps:
         '--vpc-connector=${_VPC_CONNECTOR}',
         '--no-allow-unauthenticated',
         '--set-env-vars=BUCKET_NAME=${_BUCKET_NAME},BQ_DATASET=${_BQ_DATASET},BQ_TABLE=${_BQ_TABLE},DOC_API_URL=${_DOC_API_URL}'
+
       ]
