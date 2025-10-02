@@ -20,43 +20,6 @@ GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
 # Load embedding model once globally
 embedding_model = TextEmbeddingModel.from_pretrained(GEMINI_EMBEDDING_MODEL)
 
-import subprocess
-import requests
-import json
- 
-tmp = subprocess.run(['gcloud', 'auth', 'print-identity-token'], stdout=subprocess.PIPE, universal_newlines=True)
-token = str(tmp.stdout).strip()
- 
-# Set the headers including the Authorization and Content-Type
-headers = {
-    "Authorization": f"Bearer {token}",
-    "Content-Type": "application/json"
-}
- 
-# Set the JSON payload
-data = {
-"gcs_uri": "gs://test.pdf"
-}
-
-# data = {
-# "gcs_uri": "gs://aif_lpr_osm-bucket_01/osm_df_pipeline/123456/123456.pdf",
-#     "individual_pages": [2]
-# }
- 
-# Send the POST request with the payload
-response = requests.post("https://api/", headers=headers, json=data)
- 
-# Print the response
-# print(response)
-try:
-    print(response.json())
-except json.JSONDecodeError:
-    print("Response content is not in JSON format")
-    print(response.content)
-
-response_content = response.content.decode("utf-8")
-
-
 # Utility Functions
 
 def gemini_embed_single(text: str) -> np.ndarray:
