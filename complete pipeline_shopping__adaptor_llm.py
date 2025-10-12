@@ -1,4 +1,5 @@
 #shopping_list_adaptor.py
+!pip install faiss-cpu numpy torch nltk sentence-transformers bertopic hdbscan umap-learn gensim google-cloud-aiplatform
 
 import os, random, numpy as np, torch, nltk, logging, re, json
 from collections import defaultdict
