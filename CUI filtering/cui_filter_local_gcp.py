@@ -14,7 +14,7 @@ LOCATION = "us-central1"  # or your region
 aiplatform.init(project=PROJECT_ID, location=LOCATION)
 
 # STEP 4: Load Excel file
-excel_path = "your_excel_file.xlsx"  # Replace with your actual file path
+excel_path = "cui_table.xlsx"  # Replace with your actual file path
 df = pd.read_excel(excel_path)
 
 # STEP 5: Validate required columns
