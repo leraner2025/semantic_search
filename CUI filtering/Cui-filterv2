@@ -1,7 +1,3 @@
-!pip install networkx matplotlib
-
-
-
 import requests
 import csv
 import numpy as np
@@ -13,8 +9,6 @@ import subprocess
 import time
 import pandas as pd
 from collections import defaultdict
-import networkx as nx
-import matplotlib.pyplot as plt
 
 # Initialize Vertex AI
 aiplatform.init(project=project_id, location="us-central1")
@@ -68,7 +62,7 @@ def timed(label):
 
 # Step 1: Extract CUIs from NER response
 @timed("Step 1 - CUI extraction")
-def extract_cuis(ner_response, input_text, max_cuis=100):
+def extract_cuis(ner_response, input_text, max_cuis=10):
     cuis = list(set(ner_response.get(input_text, [])))
     cuis = cuis[:max_cuis]
     print(f"CUIs extracted: {len(cuis)}")
@@ -185,28 +179,13 @@ def print_tree_from_final_cuis(final_cuis, df):
             seen.add(path_str)
             print(path_str)
 
-# Step 6: Visualize tree
-def visualize_cui_tree(final_cuis, df):
-    G = nx.DiGraph()
-    for _, row in df.iterrows():
-        parent = str(row['REF_CUI']).strip()
-        child = str(row['child_cui']).strip()
-        G.add_edge(parent, child)
-
-    node_colors = ["orange" if node in final_cuis else "lightblue" for node in G.nodes()]
-    plt.figure(figsize=(12, 8))
-    pos = nx.spring_layout(G, k=0.5, seed=42)
-    nx.draw(G, pos, with_labels=True, node_color=node_colors, node_size=800, font_size=8, arrows=True)
-    plt.title("CUI Hierarchy Tree")
-    plt.show()
-
-# Step 7: Export to CSV
+# Step 6: Export to CSV
 def export_to_csv(cui_list, filename="final_cuis.csv"):
     df = pd.DataFrame({"CUI": cui_list})
     df.to_csv(filename, index=False)
     print(f"Exported {len(cui_list)} CUIs to {filename}")
 
-# Step 8: Pipeline
+# Step 7: Pipeline
 def run_pipeline(text, note_embedding, project_id, dataset, parent_child_table, embedding_table, export_csv=True):
     client = bigquery.Client()
 
@@ -217,13 +196,11 @@ def run_pipeline(text, note_embedding, project_id, dataset, parent_child_table, 
     final_cuis = compute_similarity(note_embedding, cui_embeddings, threshold=0.5)
 
     print_tree_from_final_cuis(final_cuis, df)
-    visualize_cui_tree(final_cuis, df)
 
     if export_csv:
         export_to_csv(final_cuis)
 
-    return 
-
+    return final_cuis
 
 # Example usage
 if __name__ == "__main__":
