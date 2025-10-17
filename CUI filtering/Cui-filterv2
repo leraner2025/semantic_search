@@ -1,3 +1,7 @@
+!pip install networkx matplotlib
+
+
+
 import requests
 import csv
 import numpy as np
@@ -9,13 +13,10 @@ import subprocess
 import time
 import pandas as pd
 from collections import defaultdict
+import networkx as nx
+import matplotlib.pyplot as plt
 
 # Initialize Vertex AI
-project_id = project_id
-dataset = dataset
-parent_child_table = parent_child_table
-embedding_table = embedding_table
-
 aiplatform.init(project=project_id, location="us-central1")
 GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
 gemini_model = TextEmbeddingModel.from_pretrained(GEMINI_EMBEDDING_MODEL)
@@ -36,14 +37,13 @@ gcp_update_header()
 
 # API Call: NER CUI Extraction
 def call_ner_api(text):
-    url = url
+    url = url  # Make sure this is defined
     payload = {
         "query_texts": [text],
         "top_k": 3
     }
     try:
         response = requests.post(url, json=payload, headers=headers)
-        # print(f"Raw response status: {response.status_code}")
         response.raise_for_status()
         data = response.json()
         cui_count = len(data.get(text, []))
@@ -74,16 +74,14 @@ def extract_cuis(ner_response, input_text, max_cuis=100):
     print(f"CUIs extracted: {len(cuis)}")
     return cuis
 
+# Step 2: Deepest child traversal
 @timed("Step 2 - Deepest child traversal")
 def get_deepest_children_from_hierarchy(client, project_id, dataset, parent_child_table, ner_cuis):
     if not ner_cuis:
         print("No CUIs provided for hierarchy traversal.")
-        return []
+        return [], pd.DataFrame()
 
-    # Format CUIs for SQL-safe string list
     cuis_str = ",".join([f"'{c}'" for c in ner_cuis])
-
-    # Query handles repeated field NODE_CUI_LIST using UNNEST
     query = f"""
     SELECT REF_CUI, child_cui
     FROM `{project_id}.{dataset}.{parent_child_table}`,
@@ -95,24 +93,20 @@ def get_deepest_children_from_hierarchy(client, project_id, dataset, parent_chil
         df = client.query(query).to_dataframe()
     except Exception as e:
         print(f"Query failed: {e}")
-        return []
+        return [], pd.DataFrame()
 
     if df.empty:
         print("No hierarchy data found for given CUIs.")
-        return ner_cuis  # fallback to original CUIs
+        return ner_cuis, df
 
-    # Fill missing REF_CUI values if any (nullable field)
     df['REF_CUI'] = df['REF_CUI'].ffill()
 
-    # Build parent-child tree
-    from collections import defaultdict
     cui_tree = defaultdict(list)
     for _, row in df.iterrows():
         parent = str(row['REF_CUI']).strip()
         child = str(row['child_cui']).strip()
         cui_tree[parent].append(child)
 
-    # Recursive traversal with cycle protection
     def find_deepest(cui, visited=None):
         if visited is None:
             visited = set()
@@ -124,16 +118,13 @@ def get_deepest_children_from_hierarchy(client, project_id, dataset, parent_chil
             leaves.extend(find_deepest(child, visited.copy()))
         return leaves
 
-    # Collect deepest CUIs
     final_cuis = []
     for cui in ner_cuis:
         final_cuis.extend(find_deepest(cui))
 
-    final_cuis = list(set(final_cuis))  # Deduplicate
+    final_cuis = list(set(final_cuis))
     print(f"Deepest CUIs found: {len(final_cuis)}")
-    return final_cuis
-
-
+    return final_cuis, df
 
 # Step 3: Retrieve embeddings
 @timed("Step 3 - Embedding retrieval")
@@ -162,31 +153,83 @@ def compute_similarity(note_embedding, cui_embeddings, threshold=0.5):
     print(f"CUIs above threshold ({threshold}): {len(filtered)}")
     return filtered
 
-# Step 5: Export to CSV
+# Step 5: Print ancestry tree
+def print_tree_from_final_cuis(final_cuis, df):
+    child_to_parents = defaultdict(list)
+    for _, row in df.iterrows():
+        parent = str(row['REF_CUI']).strip()
+        child = str(row['child_cui']).strip()
+        child_to_parents[child].append(parent)
+
+    def trace_to_root(cui, path=None):
+        if path is None:
+            path = []
+        path.append(cui)
+        if cui not in child_to_parents:
+            return [path[::-1]]
+        paths = []
+        for parent in child_to_parents[cui]:
+            paths.extend(trace_to_root(parent, path.copy()))
+        return paths
+
+    print("\n🌳 Final CUI Tree Paths:")
+    all_paths = []
+    for cui in final_cuis:
+        paths = trace_to_root(cui)
+        all_paths.extend(paths)
+
+    seen = set()
+    for path in all_paths:
+        path_str = " → ".join(path)
+        if path_str not in seen:
+            seen.add(path_str)
+            print(path_str)
+
+# Step 6: Visualize tree
+def visualize_cui_tree(final_cuis, df):
+    G = nx.DiGraph()
+    for _, row in df.iterrows():
+        parent = str(row['REF_CUI']).strip()
+        child = str(row['child_cui']).strip()
+        G.add_edge(parent, child)
+
+    node_colors = ["orange" if node in final_cuis else "lightblue" for node in G.nodes()]
+    plt.figure(figsize=(12, 8))
+    pos = nx.spring_layout(G, k=0.5, seed=42)
+    nx.draw(G, pos, with_labels=True, node_color=node_colors, node_size=800, font_size=8, arrows=True)
+    plt.title("CUI Hierarchy Tree")
+    plt.show()
+
+# Step 7: Export to CSV
 def export_to_csv(cui_list, filename="final_cuis.csv"):
     df = pd.DataFrame({"CUI": cui_list})
     df.to_csv(filename, index=False)
     print(f"Exported {len(cui_list)} CUIs to {filename}")
 
-# Step 6: Pipeline
+# Step 8: Pipeline
 def run_pipeline(text, note_embedding, project_id, dataset, parent_child_table, embedding_table, export_csv=True):
     client = bigquery.Client()
 
     ner_response = call_ner_api(text)
     ner_cuis = extract_cuis(ner_response, text)
-    deepest_cuis = get_deepest_children_from_hierarchy(client, project_id, dataset, parent_child_table, ner_cuis)
+    deepest_cuis, df = get_deepest_children_from_hierarchy(client, project_id, dataset, parent_child_table, ner_cuis)
     cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, deepest_cuis)
     final_cuis = compute_similarity(note_embedding, cui_embeddings, threshold=0.5)
+
+    print_tree_from_final_cuis(final_cuis, df)
+    visualize_cui_tree(final_cuis, df)
 
     if export_csv:
         export_to_csv(final_cuis)
 
-    return final_cuis
+    return 
+
 
 # Example usage
 if __name__ == "__main__":
     text = "mris for 6 months"
     note_embedding = gemini_model.get_embeddings([text])[0].values
+
     final_cuis = run_pipeline(
         text,
         note_embedding,
@@ -196,4 +239,6 @@ if __name__ == "__main__":
         embedding_table,
         export_csv=True
     )
+
     print(f"\nFinal CUIs selected: {len(final_cuis)}")
+    print("Final CUIs:", final_cuis)
