@@ -1,0 +1,174 @@
+import requests
+import csv
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from google.cloud import bigquery, aiplatform
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
+import subprocess
+import time
+import pandas as pd
+from collections import defaultdict
+
+# Initialize Vertex AI
+project_id = "your-gcp-project-id"
+dataset = "your_dataset"
+parent_child_table = "your_parent_child_table"
+embedding_table = "your_embedding_table"
+
+aiplatform.init(project=project_id, location="us-central1")
+GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
+gemini_model = TextEmbeddingModel.from_pretrained(GEMINI_EMBEDDING_MODEL)
+
+# GCP Auth Header Setup
+headers = None
+def gcp_update_header():
+    global headers
+    tmp = subprocess.run(['gcloud', 'auth', 'print-identity-token'], stdout=subprocess.PIPE, universal_newlines=True)
+    if tmp.returncode != 0:
+        raise Exception("Cannot get GCP access token")
+    identity_token = tmp.stdout.strip()
+    headers = {
+        "Authorization": f"Bearer {identity_token}",
+        "Content-Type": "application/json"
+    }
+gcp_update_header()
+
+# API Call: NER CUI Extraction
+def call_ner_api(text):
+    url = "your_ner_api_url"
+    payload = {
+        "query_texts": [text],
+        "top_k": 3
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        print(f"Raw response status: {response.status_code}")
+        response.raise_for_status()
+        data = response.json()
+        cui_count = len(data.get(text, []))
+        print(f"API call successful. CUIs returned: {cui_count}")
+        return data
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error: {e}")
+    return {}
+
+# Timing decorator
+def timed(label):
+    def wrapper(func):
+        def inner(*args, **kwargs):
+            start = time.time()
+            result = func(*args, **kwargs)
+            print(f"{label} took {time.time() - start:.2f} sec")
+            return result
+        return inner
+    return wrapper
+
+# Step 1: Extract CUIs from NER response
+@timed("Step 1 - CUI extraction")
+def extract_cuis(ner_response, input_text, max_cuis=1):
+    cuis = list(set(ner_response.get(input_text, [])))
+    cuis = cuis[:max_cuis]
+    print(f"CUIs extracted: {len(cuis)}")
+    return cuis
+
+# Step 2: Deepest child traversal from full hierarchy
+@timed("Step 2 - Deepest child traversal")
+def get_deepest_children_from_hierarchy(client, project_id, dataset, parent_child_table, ner_cuis):
+    if not ner_cuis:
+        return []
+
+    query = f"""
+    SELECT Parent_CUI, Child_CUI
+    FROM `{project_id}.{dataset}.{parent_child_table}`
+    WHERE Child_CUI IS NOT NULL
+    """
+    df = client.query(query).to_dataframe()
+    df['Parent_CUI'] = df['Parent_CUI'].ffill()
+
+    cui_tree = defaultdict(list)
+    for _, row in df.iterrows():
+        parent = str(row['Parent_CUI']).strip()
+        child = str(row['Child_CUI']).strip()
+        cui_tree[parent].append(child)
+
+    def find_deepest(cui):
+        if cui not in cui_tree:
+            return [cui]
+        leaves = []
+        for child in cui_tree[cui]:
+            leaves.extend(find_deepest(child))
+        return leaves
+
+    final_cuis = []
+    for cui in ner_cuis:
+        final_cuis.extend(find_deepest(cui))
+
+    final_cuis = list(set(final_cuis))  # Deduplicate
+    print(f"Deepest CUIs found: {len(final_cuis)}")
+    return final_cuis
+
+# Step 3: Retrieve embeddings
+@timed("Step 3 - Embedding retrieval")
+def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
+    if not cuis:
+        return {}
+    cuis_str = ",".join([f"'{c}'" for c in cuis])
+    query = f"""
+    SELECT REF_CUI, REF_Embedding
+    FROM `{project_id}.{dataset}.{embedding_table}`
+    WHERE REF_CUI IN UNNEST([{cuis_str}])
+    """
+    results = client.query(query).result()
+    return {row.REF_CUI: row.REF_Embedding for row in results}
+
+# Step 4: Compute cosine similarity
+@timed("Step 4 - Similarity scoring")
+def compute_similarity(note_embedding, cui_embeddings, threshold=0.5):
+    if not cui_embeddings:
+        return []
+    note_vec = np.array(note_embedding).reshape(1, -1)
+    cui_ids = list(cui_embeddings.keys())
+    cui_matrix = np.array([cui_embeddings[cui] for cui in cui_ids])
+    scores = cosine_similarity(note_vec, cui_matrix)[0]
+    filtered = [cui for cui, score in zip(cui_ids, scores) if score >= threshold]
+    print(f"CUIs above threshold ({threshold}): {len(filtered)}")
+    return filtered
+
+# Step 5: Export to CSV
+def export_to_csv(cui_list, filename="final_cuis.csv"):
+    df = pd.DataFrame({"CUI": cui_list})
+    df.to_csv(filename, index=False)
+    print(f"Exported {len(cui_list)} CUIs to {filename}")
+
+# Step 6: Pipeline
+def run_pipeline(text, note_embedding, project_id, dataset, parent_child_table, embedding_table, export_csv=True):
+    client = bigquery.Client()
+
+    ner_response = call_ner_api(text)
+    ner_cuis = extract_cuis(ner_response, text)
+    deepest_cuis = get_deepest_children_from_hierarchy(client, project_id, dataset, parent_child_table, ner_cuis)
+    cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, deepest_cuis)
+    final_cuis = compute_similarity(note_embedding, cui_embeddings, threshold=0.5)
+
+    if export_csv:
+        export_to_csv(final_cuis)
+
+    return final_cuis
+
+# Example usage
+if __name__ == "__main__":
+    text = "mris for 6 months"
+    note_embedding = gemini_model.get_embeddings([text])[0].values
+    final_cuis = run_pipeline(
+        text,
+        note_embedding,
+        project_id,
+        dataset,
+        parent_child_table,
+        embedding_table,
+        export_csv=True
+    )
+    print(f"\nFinal CUIs selected: {len(final_cuis)}")
