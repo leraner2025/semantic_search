@@ -1,5 +1,4 @@
 import requests
-import csv
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from google.cloud import bigquery, aiplatform
@@ -29,99 +28,25 @@ def gcp_update_header():
     }
 gcp_update_header()
 
-# API Call: NER CUI Extraction
+# Step 1: NER API
 def call_ner_api(text):
-    url = url  # Make sure this is defined
-    payload = {
-        "query_texts": [text],
-        "top_k": 3
-    }
+    url = url  # Define your endpoint
+    payload = {"query_texts": [text], "top_k": 3}
     try:
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
-        cui_count = len(data.get(text, []))
-        print(f"API call successful. CUIs returned: {cui_count}")
         return data
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed: {e}")
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error: {e}")
-    return {}
+    except Exception as e:
+        print(f"NER API error: {e}")
+        return {}
 
-# Timing decorator
-def timed(label):
-    def wrapper(func):
-        def inner(*args, **kwargs):
-            start = time.time()
-            result = func(*args, **kwargs)
-            print(f"{label} took {time.time() - start:.2f} sec")
-            return result
-        return inner
-    return wrapper
-
-# Step 1: Extract CUIs from NER response
-@timed("Step 1 - CUI extraction")
+# Step 2: Extract CUIs
 def extract_cuis(ner_response, input_text, max_cuis=10):
     cuis = list(set(ner_response.get(input_text, [])))
-    cuis = cuis[:max_cuis]
-    print(f"CUIs extracted: {len(cuis)}")
-    return cuis
+    return cuis[:max_cuis]
 
-# Step 2: Deepest child traversal
-@timed("Step 2 - Deepest child traversal")
-def get_deepest_children_from_hierarchy(client, project_id, dataset, parent_child_table, ner_cuis):
-    if not ner_cuis:
-        print("No CUIs provided for hierarchy traversal.")
-        return [], pd.DataFrame()
-
-    cuis_str = ",".join([f"'{c}'" for c in ner_cuis])
-    query = f"""
-    SELECT REF_CUI, child_cui
-    FROM `{project_id}.{dataset}.{parent_child_table}`,
-    UNNEST(NODE_CUI_LIST) AS child_cui
-    WHERE REF_CUI IN ({cuis_str}) OR child_cui IN ({cuis_str})
-    """
-
-    try:
-        df = client.query(query).to_dataframe()
-    except Exception as e:
-        print(f"Query failed: {e}")
-        return [], pd.DataFrame()
-
-    if df.empty:
-        print("No hierarchy data found for given CUIs.")
-        return ner_cuis, df
-
-    df['REF_CUI'] = df['REF_CUI'].ffill()
-
-    cui_tree = defaultdict(list)
-    for _, row in df.iterrows():
-        parent = str(row['REF_CUI']).strip()
-        child = str(row['child_cui']).strip()
-        cui_tree[parent].append(child)
-
-    def find_deepest(cui, visited=None):
-        if visited is None:
-            visited = set()
-        if cui in visited or cui not in cui_tree:
-            return [cui]
-        visited.add(cui)
-        leaves = []
-        for child in cui_tree[cui]:
-            leaves.extend(find_deepest(child, visited.copy()))
-        return leaves
-
-    final_cuis = []
-    for cui in ner_cuis:
-        final_cuis.extend(find_deepest(cui))
-
-    final_cuis = list(set(final_cuis))
-    print(f"Deepest CUIs found: {len(final_cuis)}")
-    return final_cuis, df
-
-# Step 3: Retrieve embeddings
-@timed("Step 3 - Embedding retrieval")
+# Step 3: Retrieve embeddings for CUIs
 def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
     if not cuis:
         return {}
@@ -134,9 +59,8 @@ def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
     results = client.query(query).result()
     return {row.REF_CUI: row.REF_Embedding for row in results}
 
-# Step 4: Compute cosine similarity
-@timed("Step 4 - Similarity scoring")
-def compute_similarity(note_embedding, cui_embeddings, threshold=0.5):
+# Step 4: Cosine similarity filtering
+def filter_by_similarity(note_embedding, cui_embeddings, threshold=0.5):
     if not cui_embeddings:
         return []
     note_vec = np.array(note_embedding).reshape(1, -1)
@@ -147,55 +71,49 @@ def compute_similarity(note_embedding, cui_embeddings, threshold=0.5):
     print(f"CUIs above threshold ({threshold}): {len(filtered)}")
     return filtered
 
-# Step 5: Print ancestry tree
-def print_tree_from_final_cuis(final_cuis, df):
-    child_to_parents = defaultdict(list)
-    for _, row in df.iterrows():
-        parent = str(row['REF_CUI']).strip()
-        child = str(row['child_cui']).strip()
-        child_to_parents[child].append(parent)
+# Step 5: Leave-One-Out filtering
+def leave_one_out(note_embedding, cui_embeddings, threshold=0.5):
+    initial_set = filter_by_similarity(note_embedding, cui_embeddings, threshold)
+    if not initial_set:
+        return []
 
-    def trace_to_root(cui, path=None):
-        if path is None:
-            path = []
-        path.append(cui)
-        if cui not in child_to_parents:
-            return [path[::-1]]
-        paths = []
-        for parent in child_to_parents[cui]:
-            paths.extend(trace_to_root(parent, path.copy()))
-        return paths
+    def coverage_score(cui_subset):
+        matrix = np.array([cui_embeddings[cui] for cui in cui_subset])
+        scores = cosine_similarity(np.array(note_embedding).reshape(1, -1), matrix)[0]
+        return np.mean(scores)
 
-    print("\n🌳 Final CUI Tree Paths:")
-    all_paths = []
-    for cui in final_cuis:
-        paths = trace_to_root(cui)
-        all_paths.extend(paths)
+    best_set = initial_set.copy()
+    improved = True
 
-    seen = set()
-    for path in all_paths:
-        path_str = " → ".join(path)
-        if path_str not in seen:
-            seen.add(path_str)
-            print(path_str)
+    while improved and len(best_set) > 1:
+        scores = []
+        for cui in best_set:
+            subset = [c for c in best_set if c != cui]
+            score = coverage_score(subset)
+            scores.append((cui, score))
+        worst_cui, worst_score = min(scores, key=lambda x: x[1])
+        current_score = coverage_score(best_set)
+        if worst_score >= current_score:
+            improved = False
+        else:
+            best_set.remove(worst_cui)
 
-# Step 6: Export to CSV
+    print(f"Final CUIs after LOO filtering: {len(best_set)}")
+    return best_set
+
+# Step 6: Export
 def export_to_csv(cui_list, filename="final_cuis.csv"):
-    df = pd.DataFrame({"CUI": cui_list})
-    df.to_csv(filename, index=False)
+    pd.DataFrame({"CUI": cui_list}).to_csv(filename, index=False)
     print(f"Exported {len(cui_list)} CUIs to {filename}")
 
 # Step 7: Pipeline
-def run_pipeline(text, note_embedding, project_id, dataset, parent_child_table, embedding_table, export_csv=True):
+def run_pipeline(text, note_embedding, project_id, dataset, embedding_table, export_csv=True):
     client = bigquery.Client()
 
     ner_response = call_ner_api(text)
     ner_cuis = extract_cuis(ner_response, text)
-    deepest_cuis, df = get_deepest_children_from_hierarchy(client, project_id, dataset, parent_child_table, ner_cuis)
-    cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, deepest_cuis)
-    final_cuis = compute_similarity(note_embedding, cui_embeddings, threshold=0.5)
-
-    print_tree_from_final_cuis(final_cuis, df)
+    cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, ner_cuis)
+    final_cuis = leave_one_out(note_embedding, cui_embeddings, threshold=0.5)
 
     if export_csv:
         export_to_csv(final_cuis)
@@ -212,7 +130,6 @@ if __name__ == "__main__":
         note_embedding,
         project_id,
         dataset,
-        parent_child_table,
         embedding_table,
         export_csv=True
     )
