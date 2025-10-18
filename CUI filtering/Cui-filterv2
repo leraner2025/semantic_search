@@ -71,7 +71,7 @@ def filter_by_similarity(note_embedding, cui_embeddings, threshold=0.5):
     print(f"CUIs above threshold ({threshold}): {len(filtered)}")
     return filtered
 
-# Step 5: Leave-One-Out filtering
+# Step 5: Leave-One-Out filtering with impact display
 def leave_one_out(note_embedding, cui_embeddings, threshold=0.5):
     initial_set = filter_by_similarity(note_embedding, cui_embeddings, threshold)
     if not initial_set:
@@ -84,6 +84,7 @@ def leave_one_out(note_embedding, cui_embeddings, threshold=0.5):
 
     best_set = initial_set.copy()
     improved = True
+    impact_rows = []
 
     while improved and len(best_set) > 1:
         scores = []
@@ -93,13 +94,26 @@ def leave_one_out(note_embedding, cui_embeddings, threshold=0.5):
             scores.append((cui, score))
         worst_cui, worst_score = min(scores, key=lambda x: x[1])
         current_score = coverage_score(best_set)
+        delta = round(current_score - worst_score, 4)
+        impact_rows.append({
+            'Removed CUI': worst_cui,
+            'Coverage Drop': delta
+        })
         if worst_score >= current_score:
             improved = False
         else:
             best_set.remove(worst_cui)
 
-    print(f"Final CUIs after LOO filtering: {len(best_set)}")
+    print(f"\nFinal CUIs after LOO filtering: {len(best_set)}")
+    print("Final CUIs:", best_set)
+
+    # Display impact table
+    impact_df = pd.DataFrame(impact_rows)
+    print("Leave-One-Out Impact Table:")
+    print(impact_df)
+
     return best_set
+
 
 # Step 6: Export
 def export_to_csv(cui_list, filename="final_cuis.csv"):
