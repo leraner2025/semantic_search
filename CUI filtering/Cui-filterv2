@@ -30,21 +30,23 @@ gcp_update_header()
 
 # Step 1: NER API
 def call_ner_api(text):
-    url = url  # Define your endpoint
+    url = url
     payload = {"query_texts": [text], "top_k": 3}
     try:
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        data = response.json()
+        data = response.json()         
+        cui_count = len(data.get(text, []))
+        print(f"API call successful. CUIs returned: {cui_count}")
         return data
     except Exception as e:
         print(f"NER API error: {e}")
         return {}
 
 # Step 2: Extract CUIs
-def extract_cuis(ner_response, input_text, max_cuis=10):
+def extract_cuis(ner_response, input_text):
     cuis = list(set(ner_response.get(input_text, [])))
-    return cuis[:max_cuis]
+    return cuis
 
 # Step 3: Retrieve embeddings for CUIs
 def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
@@ -60,7 +62,7 @@ def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
     return {row.REF_CUI: row.REF_Embedding for row in results}
 
 # Step 4: Cosine similarity filtering
-def filter_by_similarity(note_embedding, cui_embeddings, threshold=0.5):
+def filter_by_similarity(note_embedding, cui_embeddings, threshold):
     if not cui_embeddings:
         return []
     note_vec = np.array(note_embedding).reshape(1, -1)
@@ -73,62 +75,97 @@ def filter_by_similarity(note_embedding, cui_embeddings, threshold=0.5):
 
 # Step 5: Leave-One-Out filtering with impact display
 def leave_one_out(note_embedding, cui_embeddings, threshold=0.5):
+
+    # Step 1: Filter CUIs by similarity threshold
     initial_set = filter_by_similarity(note_embedding, cui_embeddings, threshold)
     if not initial_set:
-        return []
+        return [] 
+
+    # Step 2: Compute full coverage score
 
     def coverage_score(cui_subset):
         matrix = np.array([cui_embeddings[cui] for cui in cui_subset])
         scores = cosine_similarity(np.array(note_embedding).reshape(1, -1), matrix)[0]
-        return np.mean(scores)
+        return np.mean(scores) 
 
-    best_set = initial_set.copy()
-    improved = True
+    full_score = coverage_score(initial_set)
     impact_rows = []
+    retained_cuis = []
 
-    while improved and len(best_set) > 1:
-        scores = []
-        for cui in best_set:
-            subset = [c for c in best_set if c != cui]
-            score = coverage_score(subset)
-            scores.append((cui, score))
-        worst_cui, worst_score = min(scores, key=lambda x: x[1])
-        current_score = coverage_score(best_set)
-        delta = round(current_score - worst_score, 4)
+ 
+
+    # Step 3: Evaluate each CUI independently
+
+    for cui in initial_set:
+        subset = [c for c in initial_set if c != cui]
+        score = coverage_score(subset)
+        delta = round(full_score - score, 4)
         impact_rows.append({
-            'Removed CUI': worst_cui,
+            'CUI': cui,
             'Coverage Drop': delta
         })
-        if worst_score >= current_score:
-            improved = False
-        else:
-            best_set.remove(worst_cui)
 
-    print(f"\nFinal CUIs after LOO filtering: {len(best_set)}")
-    print("Final CUIs:", best_set)
+        if delta > 0:
+            retained_cuis.append(cui)
+            
+    # Step 4: Display impact table
 
-    # Display impact table
     impact_df = pd.DataFrame(impact_rows)
-    print("Leave-One-Out Impact Table:")
+    print("\n Leave-One-Out Impact Table:")
     print(impact_df)
 
-    return best_set
+    print(f"\n Final CUIs retained: {len(retained_cuis)}")
+    print("Final CUIs:", retained_cuis)
+
+    return retained_cuis
 
 
 # Step 6: Export
-def export_to_csv(cui_list, filename="final_cuis.csv"):
+def export_to_csv(cui_list, filename="final_cuisv1.csv"):
     pd.DataFrame({"CUI": cui_list}).to_csv(filename, index=False)
     print(f"Exported {len(cui_list)} CUIs to {filename}")
 
 # Step 7: Pipeline
 def run_pipeline(text, note_embedding, project_id, dataset, embedding_table, export_csv=True):
-    client = bigquery.Client()
+    client = bigquery.Client() 
+
+    # Step 1: NER
 
     ner_response = call_ner_api(text)
-    ner_cuis = extract_cuis(ner_response, text)
-    cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, ner_cuis)
-    final_cuis = leave_one_out(note_embedding, cui_embeddings, threshold=0.5)
+    ner_cuis = extract_cuis(ner_response, text) 
 
+    # Step 2: Get embeddings
+
+    cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, ner_cuis) 
+
+    # Step 3: Filter by similarity threshold
+    
+    initial_cuis = filter_by_similarity(note_embedding, cui_embeddings, threshold=0.5) #filter CUIs
+    if not initial_cuis:
+        print("No CUIs passed the similarity threshold.")
+        return [] 
+
+    # Step 4: Coverage BEFORE Leave-One-Out
+
+    initial_embeddings = np.array([cui_embeddings[cui] for cui in initial_cuis])
+    initial_centroid = np.mean(initial_embeddings, axis=0).reshape(1, -1)
+    initial_score = cosine_similarity(np.array(note_embedding).reshape(1, -1), initial_centroid)[0][0]
+    print(f"\nCoverage BEFORE Leave-One-Out: {initial_score:.4f}")
+    
+    # Step 5: Leave-One-Out filtering
+    final_cuis = leave_one_out(note_embedding, cui_embeddings, threshold=0.5)  
+
+    # Step 6: Coverage AFTER Leave-One-Out
+
+    if final_cuis:
+        final_embeddings = np.array([cui_embeddings[cui] for cui in final_cuis])
+        final_centroid = np.mean(final_embeddings, axis=0).reshape(1, -1)
+        final_score = cosine_similarity(np.array(note_embedding).reshape(1, -1), final_centroid)[0][0]
+        print(f"Coverage AFTER Leave-One-Out: {final_score:.4f}")
+    else:
+        print(" No CUIs retained after Leave-One-Out.") 
+
+    # Step 7: Export
     if export_csv:
         export_to_csv(final_cuis)
 
@@ -136,8 +173,9 @@ def run_pipeline(text, note_embedding, project_id, dataset, embedding_table, exp
 
 # Example usage
 if __name__ == "__main__":
-    text = "mris for 6 months"
+    text = "MRI of head"
     note_embedding = gemini_model.get_embeddings([text])[0].values
+    # print(note_embedding)
 
     final_cuis = run_pipeline(
         text,
