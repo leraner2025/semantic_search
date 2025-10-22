@@ -162,6 +162,16 @@ if __name__ == "__main__":
 
     run_pipeline(text, project_id, dataset, embedding_table, ner_url)
 
+#ouput: 
+# NER API call successful. CUIs found: 10413
+# Saved NER CUIs to 'ner_cuis.csv'
+# Retrieved embeddings for 10413 CUIs.
+# Saved CUI list to 'cui_embeddings.csv'
+# Clustering done: 1458 clusters found.
+# Selected 1458 representative CUIs.
+# Saved final CUIs to 'final_cuis.csv'
+# Final CUIs count: 1458
+
 # Processs:
 # What we have :Text -NER- ──► CUIs and embeddings
 # 1) Cluster CUIs (using embeddings)
