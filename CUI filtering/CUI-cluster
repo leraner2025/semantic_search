@@ -1,0 +1,178 @@
+import subprocess
+import requests
+import numpy as np
+import pandas as pd
+from collections import defaultdict
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics.pairwise import cosine_similarity
+from google.cloud import bigquery
+from vertexai.language_models import TextEmbeddingModel
+
+# Initialize Vertex AI embedding model
+gemini_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
+
+# GCP Auth Header Setup
+headers = None
+def gcp_update_header():
+    global headers
+    tmp = subprocess.run(['gcloud', 'auth', 'print-identity-token'], stdout=subprocess.PIPE, universal_newlines=True)
+    if tmp.returncode != 0:
+        raise Exception("Cannot get GCP access token")
+    identity_token = tmp.stdout.strip()
+    headers = {
+        "Authorization": f"Bearer {identity_token}",
+        "Content-Type": "application/json"
+    }
+gcp_update_header()
+
+# NER API
+
+def call_ner_api(text, url):
+    payload = {"query_texts": [text], "top_k": 3}
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        cuis = data.get(text, [])
+        print(f"NER API call successful. CUIs found: {len(cuis)}")
+        return cuis
+    except Exception as e:
+        print(f"NER API error: {e}")
+        return []
+
+
+project_id = project_id  
+dataset = dataset  
+embedding_table = embedding_table
+
+client = bigquery.Client(project=project_id)
+
+# Function to get CUIs and embeddings from BigQuery
+def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
+    if not cuis:
+        return {}
+    cuis_str = ",".join([f"'{c}'" for c in cuis])
+    query = f"""
+        SELECT CUI, Embedding
+        FROM `{project_id}.{dataset}.{embedding_table}`
+        WHERE CUI IN UNNEST([{cuis_str}])
+    """
+    results = client.query(query).result()
+    embeddings = {row.CUI: row.Embedding for row in results}
+    print(f"Retrieved embeddings for {len(embeddings)} CUIs.")
+    return embeddings
+
+# Cluster embeddings
+
+def cluster_embeddings(embeddings, threshold=0.2):
+    if len(embeddings) < 2:
+        return [0] * len(embeddings)
+    normed = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        distance_threshold=threshold,
+        metric='cosine',
+        linkage='average'
+    )
+    labels = clustering.fit_predict(normed)
+    print(f"Clustering done: {len(set(labels))} clusters found.")
+    return labels
+
+# Select representative CUIs
+
+def select_representatives(cui_list, embeddings):
+    labels = cluster_embeddings(embeddings)
+    cluster_map = defaultdict(list)
+    for i, label in enumerate(labels):
+        cluster_map[label].append((cui_list[i], embeddings[i]))
+    selected = []
+    for cuis in cluster_map.values():
+        centroid = np.mean([e for _, e in cuis], axis=0)
+        best_cui = min(cuis, key=lambda x: np.linalg.norm(x[1] - centroid))[0]
+        selected.append(best_cui)
+    print(f"Selected {len(selected)} representative CUIs.")
+    return selected
+
+# Validation
+
+def validate_with_gemini(text_embedding, cui_embeddings):
+    results = []
+    text_emb = np.array(text_embedding).reshape(1, -1)
+    for cui, emb in cui_embeddings.items():
+        cui_emb = np.array(emb).reshape(1, -1)
+        sim = cosine_similarity(text_emb, cui_emb)[0][0]
+        results.append((cui, sim))
+    return results
+
+# pipeline
+
+def run_pipeline(text, project_id, dataset, embedding_table, ner_url):
+    client = bigquery.Client()
+
+    # Step 1: NER API
+    ner_cuis = call_ner_api(text, ner_url)
+    if not ner_cuis:
+        print("No CUIs from NER. Exiting.")
+        return
+
+    #  Save NER CUIs to CSV
+    pd.DataFrame({"CUI": ner_cuis}).to_csv("ner_cuis.csv", index=False)
+    print("Saved NER CUIs to 'ner_cuis.csv'")
+
+    # Step 2: Get embeddings from BigQuery
+    cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, ner_cuis)
+    if not cui_embeddings:
+        print("No embeddings found for CUIs. Exiting.")
+        return
+
+    #  Save only CUI keys to CSV (no embeddings)
+    pd.DataFrame({"CUI": list(cui_embeddings.keys())}).to_csv("cui_embeddings.csv", index=False)
+    print("Saved CUI list to 'cui_embeddings.csv'")
+
+    # Step 3: Clustering and representative selection
+    cui_list = list(cui_embeddings.keys())
+    embedding_matrix = np.array([cui_embeddings[cui] for cui in cui_list])
+    selected_cuis = select_representatives(cui_list, embedding_matrix)
+
+    #  Save final CUIs to CSV
+    pd.DataFrame({"CUI": selected_cuis}).to_csv("final_cuis.csv", index=False)
+    print("Saved final CUIs to 'final_cuis.csv'")
+    print(f"Final CUIs count: {len(selected_cuis)}")
+
+    # Get embedding for full text
+    text_embedding = gemini_model.get_embeddings([text])[0].values   
+    
+
+    # Validation
+    validation_scores = validate_with_gemini(text_embedding, {cui: cui_embeddings[cui] for cui in selected_cuis})
+    # print("\nValidation similarity scores:")
+    # for cui, sim in validation_scores:
+    #     print(f"{cui} | Similarity: {sim:.4f}")
+
+# example
+
+if __name__ == "__main__":
+    # Define your variables here:
+    project_id = project_id
+    dataset = dataset
+    embedding_table = embedding_table
+    ner_url = url
+
+    text = "MRI of head"
+
+    run_pipeline(text, project_id, dataset, embedding_table, ner_url)
+
+# Processs:
+# What we have :Text -NER- ──► CUIs and embeddings
+# 1) Cluster CUIs (using embeddings)
+# 2) Score CUIs within each cluster
+# 3) Select representative CUIs per cluster
+# 4) Filter out non-informative ones
+
+# Final Output:
+#     Dict[doc_id] = [sub-selected CUIs]
+
+
+# validation:
+
+# Contextual Embedding Similarity (Semantic Context)
