@@ -1,0 +1,315 @@
+import subprocess
+import requests
+import numpy as np
+import pandas as pd
+from collections import defaultdict
+from sklearn.metrics.pairwise import cosine_similarity
+from google.cloud import bigquery
+from vertexai.language_models import TextEmbeddingModel
+import scann
+import ast
+
+# ============================================================
+#  INITIALIZATION
+# ============================================================
+
+gemini_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
+
+# --------- GCP Auth Header ----------
+headers = None
+def gcp_update_header():
+    global headers
+    tmp = subprocess.run(['gcloud', 'auth', 'print-identity-token'],
+                         stdout=subprocess.PIPE, universal_newlines=True)
+    if tmp.returncode != 0:
+        raise Exception("Cannot get GCP access token")
+    identity_token = tmp.stdout.strip()
+    headers = {
+        "Authorization": f"Bearer {identity_token}",
+        "Content-Type": "application/json"
+    }
+
+gcp_update_header()
+
+# ============================================================
+#  NER CALL
+# ============================================================
+
+def call_ner_api(text, url):
+    payload = {"query_texts": [text], "top_k": 3}
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        cuis = data.get(text, [])
+        print(f"NER API call successful. CUIs found: {len(cuis)}")
+        return cuis
+    except Exception as e:
+        print(f"NER API error: {e}")
+        return []
+
+# ============================================================
+#  BIGQUERY EMBEDDINGS
+# ============================================================
+
+def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
+    import ast
+
+    if not cuis:
+        return {}
+
+    query = f"""
+        SELECT CUI, Embedding
+        FROM `{project_id}.{dataset}.{embedding_table}`
+        WHERE CUI IN UNNEST(@cuis)
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("cuis", "STRING", cuis)
+        ]
+    )
+
+    results = client.query(query, job_config=job_config).result()
+    embeddings = {}
+
+    for row in results:
+        emb = row.Embedding
+
+        # Ensure embeddings are numeric arrays
+        if isinstance(emb, str):
+            try:
+                emb = np.array(ast.literal_eval(emb), dtype=float)
+            except Exception as e:
+                print(f"Warning: Could not parse embedding for {row.CUI}: {e}")
+                continue
+        else:
+            emb = np.array(emb, dtype=float)
+
+        embeddings[row.CUI] = emb
+
+    # Debug: show sample embedding type, dtype, and shape
+    if embeddings:
+        sample_cui = next(iter(embeddings))
+        sample_emb = embeddings[sample_cui]
+        print("Sample embedding from BigQuery:")
+        print(f"   CUI: {sample_cui}")
+        print(f"   Type: {type(sample_emb)}, DType: {sample_emb.dtype}, Shape: {sample_emb.shape}")
+    else:
+        print("No embeddings returned from BigQuery.")
+
+    print(f"Retrieved embeddings for {len(embeddings)} CUIs.")
+    return embeddings
+
+
+# ============================================================
+#  SCANN CLUSTERING
+# ============================================================
+
+def cluster_embeddings(embeddings, config):
+    if len(embeddings) < 2:
+        return [0] * len(embeddings)
+
+    normed_embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    cfg = config
+
+    searcher = scann.scann_ops_pybind.builder(normed_embeddings, cfg["num_neighbors"], "dot_product").tree(
+        num_leaves=cfg["num_leaves"],
+        num_leaves_to_search=cfg["num_leaves_to_search"],
+        training_sample_size=cfg["training_sample_size"]
+    ).score_ah(
+        cfg["quantization_bins"], anisotropic_quantization_threshold=cfg["quantization_threshold"]
+    ).reorder(cfg["reorder"]).build()
+
+    clusters = [-1] * len(embeddings)
+    cluster_id = 0
+    for i in range(len(embeddings)):
+        if clusters[i] != -1:
+            continue
+        neighbors, distances = searcher.search_batched(normed_embeddings[i:i+1], final_num_neighbors=cfg["num_neighbors"])
+        neighbors = neighbors[0]
+        distances = distances[0]
+
+        clusters[i] = cluster_id
+        for n, dist in zip(neighbors[1:], distances[1:]):
+            if dist >= 1 - cfg["distance_threshold"] and clusters[n] == -1:
+                clusters[n] = cluster_id
+        cluster_id += 1
+
+    print(f"ScaNN ({cfg['name']}) → {len(set(clusters))} clusters")
+    return clusters
+
+# ============================================================
+#  CUIS SELECTION LOGIC
+# ============================================================
+
+def pick_most_informative_cuis(cluster_cuis, cluster_embeddings, similarity_threshold=0.9):
+    sim_matrix = cosine_similarity(cluster_embeddings)
+    n = len(cluster_cuis)
+    if n == 1:
+        return cluster_cuis, list(cluster_embeddings), [], []
+    avg_similarities = sim_matrix.sum(axis=1) / (n - 1)
+    to_remove = set()
+    for i in range(n):
+        for j in range(i + 1, n):
+            if sim_matrix[i][j] >= similarity_threshold:
+                if avg_similarities[i] >= avg_similarities[j]:
+                    to_remove.add(j)
+                else:
+                    to_remove.add(i)
+    final_indices = [i for i in range(n) if i not in to_remove]
+    redundant_indices = [i for i in range(n) if i in to_remove]
+    return (
+        [cluster_cuis[i] for i in final_indices],
+        [cluster_embeddings[i] for i in final_indices],
+        [cluster_cuis[i] for i in redundant_indices],
+        [cluster_embeddings[i] for i in redundant_indices],
+    )
+
+def select_representatives(cui_list, embeddings, text_embedding, config,
+                           similarity_threshold=0.9,
+                           min_similarity_to_text=0.3,
+                           min_secondary_text_sim=0.25):
+    labels = cluster_embeddings(embeddings, config)
+    cluster_map = defaultdict(list)
+    for i, label in enumerate(labels):
+        cluster_map[label].append((cui_list[i], embeddings[i]))
+    final_cuis_with_flags = []
+    for cluster in cluster_map.values():
+        if not cluster:
+            continue
+        cluster_cuis = [cui for cui, _ in cluster]
+        cluster_embs = np.array([embedding for _, embedding in cluster])
+        primary_cuis, primary_embs, redundant_cuis, redundant_embs = pick_most_informative_cuis(
+            cluster_cuis, cluster_embs, similarity_threshold
+        )
+        kept_primaries = []
+        for cui, emb in zip(primary_cuis, primary_embs):
+            sim = cosine_similarity([emb], [text_embedding])[0][0]
+            if sim >= min_similarity_to_text:
+                kept_primaries.append((cui, emb))
+                final_cuis_with_flags.append((cui, "primary"))
+        for cui, emb in zip(redundant_cuis, redundant_embs):
+            sim_to_text = cosine_similarity([emb], [text_embedding])[0][0]
+            if sim_to_text >= min_secondary_text_sim:
+                too_similar = any(
+                    cosine_similarity([emb], [sel_emb])[0][0] >= similarity_threshold
+                    for _, sel_emb in kept_primaries
+                )
+                if not too_similar:
+                    final_cuis_with_flags.append((cui, "secondary"))
+    return final_cuis_with_flags
+
+# ============================================================
+#  AUTO CONFIG EVALUATION
+# ============================================================
+
+def evaluate_scann_configs(cui_list, embeddings, text_embedding, configs):
+    results = []
+    best_score = -1
+    best_config = None
+
+    for cfg in configs:
+        try:
+            selected = select_representatives(cui_list, embeddings, text_embedding, cfg)
+            selected_cuis = [c for c, _ in selected]
+            if not selected_cuis:
+                continue
+            selected_embs = np.array(
+                [embeddings[i] for i, cui in enumerate(cui_list) if cui in selected_cuis]
+            )
+            centroid = np.mean(selected_embs, axis=0)
+            score = cosine_similarity([centroid], [text_embedding])[0][0]
+            results.append((cfg["name"], score))
+            print(f"Config '{cfg['name']}' → coverage {score:.4f}")
+            if score > best_score:
+                best_score = score
+                best_config = cfg
+        except Exception as e:
+            print(f"Error testing config '{cfg['name']}': {e}")
+
+    pd.DataFrame(results, columns=["Config", "Coverage"]).to_csv("scann_config_results.csv", index=False)
+    print(f"\n Best ScaNN Config: {best_config['name']} (coverage={best_score:.4f})")
+    return best_config
+
+# ============================================================
+#  PIPELINE
+# ============================================================
+
+def run_pipeline(text, project_id, dataset, embedding_table, ner_url):
+    client = bigquery.Client()
+
+    # Step 1: Get CUIs
+    ner_cuis = call_ner_api(text, ner_url)
+    if not ner_cuis:
+        print("No CUIs from NER. Exiting.")
+        return
+    pd.DataFrame({"CUI": ner_cuis}).to_csv("ner_cuis.csv", index=False)
+
+    # Step 2: Get embeddings
+    cui_embeddings = get_cui_embeddings(client, project_id, dataset, embedding_table, ner_cuis)
+    cui_list = list(cui_embeddings.keys())
+    embedding_matrix = np.array([cui_embeddings[cui] for cui in cui_list], dtype=float)
+
+    # Step 3: Text embedding
+    text_embedding = gemini_model.get_embeddings([text])[0].values
+
+    # Step 4: Tune ScaNN configurations
+    scann_configs = [
+        {
+            "name": "High Accuracy",
+            "num_neighbors": 20,
+            "num_leaves": 300,
+            "num_leaves_to_search": 100,
+            "training_sample_size": 25000,
+            "quantization_bins": 4,
+            "quantization_threshold": 0.1,
+            "reorder": 200,
+            "distance_threshold": 0.2
+        },
+        {
+            "name": "Balanced",
+            "num_neighbors": 10,
+            "num_leaves": 200,
+            "num_leaves_to_search": 50,
+            "training_sample_size": 25000,
+            "quantization_bins": 2,
+            "quantization_threshold": 0.2,
+            "reorder": 100,
+            "distance_threshold": 0.2
+        },
+        {
+            "name": "Fast",
+            "num_neighbors": 5,
+            "num_leaves": 100,
+            "num_leaves_to_search": 30,
+            "training_sample_size": 25000,
+            "quantization_bins": 2,
+            "quantization_threshold": 0.3,
+            "reorder": 50,
+            "distance_threshold": 0.2
+        }
+    ]
+
+    best_config = evaluate_scann_configs(cui_list, embedding_matrix, text_embedding, scann_configs)
+
+    # Step 5: Final run with best config
+    selected_final = select_representatives(cui_list, embedding_matrix, text_embedding, best_config)
+    df_final = pd.DataFrame(selected_final, columns=["CUI", "Type"])
+    df_final.to_csv("final_cuis.csv", index=False)
+
+    print("\n Final CUIs:")
+    print(df_final)
+    return df_final
+
+# ============================================================
+#  MAIN
+# ============================================================
+
+if __name__ == "__main__":
+    project_id = "YOUR_PROJECT_ID"
+    dataset = "YOUR_DATASET"
+    embedding_table = "YOUR_EMBEDDING_TABLE"
+    ner_url = "YOUR_NER_ENDPOINT_URL"
+
+    text = "MRI of head"
+    run_pipeline(text, project_id, dataset, embedding_table, ner_url)
