@@ -4,7 +4,7 @@ import pandas as pd
 from collections import defaultdict
 import subprocess
 from sklearn.metrics.pairwise import cosine_similarity
-from google.cloud import aiplatform
+from google.cloud import bigquery, aiplatform
 import vertexai
 from vertexai.language_models import TextEmbeddingModel
 
@@ -42,7 +42,20 @@ def call_ner_api(text):
 def extract_cuis(ner_response, input_text):
     return list(set(ner_response.get(input_text, [])))
 
-# Step 3: Load UMLS hierarchy
+# Step 3: Retrieve embeddings for CUIs from BigQuery
+def get_cui_embeddings(client, project_id, dataset, embedding_table, cuis):
+    if not cuis:
+        return {}
+    cuis_str = ",".join([f"'{c}'" for c in cuis])
+    query = f"""
+    SELECT REF_CUI, REF_Embedding
+    FROM `{project_id}.{dataset}.{embedding_table}`
+    WHERE REF_CUI IN UNNEST([{cuis_str}])
+    """
+    results = client.query(query).result()
+    return {row.REF_CUI: row.REF_Embedding for row in results}
+
+# Step 4: Load UMLS hierarchy
 def load_umls_relations(mrrel_path):
     child_to_parents = defaultdict(set)
     parent_to_children = defaultdict(set)
@@ -55,7 +68,7 @@ def load_umls_relations(mrrel_path):
                 parent_to_children[parent].add(child)
     return child_to_parents, parent_to_children
 
-# Step 4: Compute IC scores
+# Step 5: Compute IC scores
 def compute_ic(parent_to_children):
     all_cuis = set(parent_to_children.keys()) | {c for children in parent_to_children.values() for c in children}
     total_cuis = len(all_cuis)
@@ -75,7 +88,7 @@ def compute_ic(parent_to_children):
         ic_scores[cui] = -np.log((desc_count + 1) / total_cuis)
     return ic_scores
 
-# Step 5: Get ancestors
+# Step 6: Get ancestors
 def get_ancestors(cui, child_to_parents):
     ancestors = set()
     queue = [cui]
@@ -87,7 +100,7 @@ def get_ancestors(cui, child_to_parents):
                 queue.append(parent)
     return ancestors
 
-# Step 6: Find Lowest Informative Ancestor
+# Step 7: Find Lowest Informative Ancestor
 def find_lia(cui, ic_scores, child_to_parents, threshold):
     candidates = get_ancestors(cui, child_to_parents) | {cui}
     informative = [c for c in candidates if ic_scores.get(c, 0) >= threshold]
@@ -95,7 +108,7 @@ def find_lia(cui, ic_scores, child_to_parents, threshold):
         return min(informative, key=lambda c: ic_scores[c])
     return cui
 
-# Step 7: Roll up CUIs
+# Step 8: Roll up CUIs
 def rollup_cuis(cui_list, ic_scores, child_to_parents, threshold):
     rolled_up = set()
     for cui in cui_list:
@@ -103,22 +116,21 @@ def rollup_cuis(cui_list, ic_scores, child_to_parents, threshold):
         rolled_up.add(rolled_up_cui)
     return list(rolled_up)
 
-# Step 8: Embed CUIs and query
-def embed_texts(texts):
-    embeddings = gemini_model.get_embeddings(texts)
-    return np.array([e.values for e in embeddings])
+# Step 9: Embed user query
+def embed_query(text):
+    embedding = gemini_model.get_embeddings([text])[0]
+    return np.array(embedding.values).reshape(1, -1)
 
-# Step 9: Filter by similarity
-def filter_by_similarity(query_text, cui_list, threshold=0.6):
-    all_texts = [query_text] + cui_list
-    embeddings = embed_texts(all_texts)
-    query_vec = embeddings[0].reshape(1, -1)
-    cui_vecs = embeddings[1:]
+# Step 10: Filter CUIs by similarity
+def filter_by_similarity(query_text, cui_embeddings_dict, threshold=0.6):
+    query_vec = embed_query(query_text)
+    cui_ids = list(cui_embeddings_dict.keys())
+    cui_vecs = np.array([cui_embeddings_dict[cui] for cui in cui_ids])
     sims = cosine_similarity(query_vec, cui_vecs)[0]
-    return [cui for cui, sim in zip(cui_list, sims) if sim >= threshold]
+    return [cui for cui, sim in zip(cui_ids, sims) if sim >= threshold]
 
-# Step 10: Full hybrid pipeline
-def get_final_cuis(text, mrrel_path, similarity_threshold=0.6):
+# Step 11: Full hybrid pipeline
+def get_final_cuis(text, mrrel_path, bq_client, project_id, dataset, embedding_table, similarity_threshold=0.6):
     ner_response = call_ner_api(text)
     cui_list = extract_cuis(ner_response, text)
     if not cui_list:
@@ -128,11 +140,22 @@ def get_final_cuis(text, mrrel_path, similarity_threshold=0.6):
     ic_scores = compute_ic(parent_to_children)
     ic_threshold = np.median(list(ic_scores.values()))
     rolled_up_cuis = rollup_cuis(cui_list, ic_scores, child_to_parents, ic_threshold)
-    final_cuis = filter_by_similarity(text, rolled_up_cuis, threshold=similarity_threshold)
+    
+    cui_embeddings = get_cui_embeddings(bq_client, project_id, dataset, embedding_table, rolled_up_cuis)
+    final_cuis = filter_by_similarity(text, cui_embeddings, threshold=similarity_threshold)
     return final_cuis
+from google.cloud import bigquery
 
-
-mrrel_path = "MRREL.RRF"  # Path to your UMLS file
+bq_client = bigquery.Client()
+mrrel_path = "MRREL.RRF"
 query_text = "Patient has Type 2 Diabetes and hypertension"
-final_cuis = get_final_cuis(query_text, mrrel_path, similarity_threshold=0.65)
+final_cuis = get_final_cuis(
+    text=query_text,
+    mrrel_path=mrrel_path,
+    bq_client=bq_client,
+    project_id=project_id,
+    dataset="your_dataset",
+    embedding_table="your_embedding_table",
+    similarity_threshold=0.65
+)
 print("Final CUIs:", final_cuis)
