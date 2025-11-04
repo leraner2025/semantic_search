@@ -1,0 +1,184 @@
+import requests
+import math
+import pandas as pd
+from google.cloud import bigquery
+from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import time
+import json
+
+
+headers = None
+
+def gcp_update_header():
+    global headers
+    tmp = subprocess.run(['gcloud', 'auth', 'print-identity-token'], stdout=subprocess.PIPE, universal_newlines=True)
+    if tmp.returncode != 0:
+        raise Exception("Cannot get GCP access token")
+    identity_token = tmp.stdout.strip()
+    headers = {
+        "Authorization": f"Bearer {identity_token}",
+        "Content-Type": "application/json"
+    }
+
+gcp_update_header()
+
+
+def get_cuis_from_text(text, url):
+    payload = {"query_texts": [text], "top_k": 3}
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        cuis = data.get(text, [])
+        print(f"[Step 1] CUIs retrieved: {len(cuis)}")
+        return cuis
+    except requests.exceptions.RequestException as e:
+        print(f"[Step 1] Request failed: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"[Step 1] JSON decode error: {e}")
+        return []
+
+
+client = bigquery.Client()
+
+
+# Step 3: Cached IC and hierarchy
+
+class ICHierarchyCache:
+    """Cache for descendants IC and MRREL hierarchy"""
+    def __init__(self, project_id, dataset, descendants_table, mrrel_table):
+        self.project_id = project_id
+        self.dataset = dataset
+        self.descendants_table = descendants_table
+        self.mrrel_table = mrrel_table
+        self.ic_map = {}
+        self.parent_map = {}
+        self.threshold = None
+        self.loaded = False
+
+    def load(self):
+        if self.loaded:
+            return
+        # Descendants IC
+        query_descendants = f"""
+            SELECT CUI, NarrowerConceptCount AS num_descendants
+            FROM `{self.project_id}.{self.dataset}.{self.descendants_table}`
+        """
+        df_descendants = client.query(query_descendants).to_dataframe()
+        total_cuis = df_descendants.shape[0]
+        df_descendants["IC"] = df_descendants["num_descendants"].apply(lambda x: -math.log((x + 1)/total_cuis))
+        self.ic_map = dict(zip(df_descendants["CUI"], df_descendants["IC"]))
+        self.threshold = df_descendants["IC"].median()
+        print(f"[Cache] IC map loaded ({len(self.ic_map)} CUIs). Median threshold: {self.threshold:.4f}")
+
+        # MRREL hierarchy
+        query_hierarchy = f"""
+            SELECT CUI1 AS child_cui, CUI2 AS parent_cui
+            FROM `{self.project_id}.{self.dataset}.{self.mrrel_table}`
+            WHERE REL = 'PAR'
+        """
+        df_hierarchy = client.query(query_hierarchy).to_dataframe()
+        self.parent_map = df_hierarchy.groupby("child_cui")["parent_cui"].apply(list).to_dict()
+        print(f"[Cache] Parent map loaded ({len(self.parent_map)} child CUIs)")
+        self.loaded = True
+
+
+# Step 4: Collect all informative ancestors
+
+def find_informative_ancestors(cui, parent_map, ic_map, threshold):
+    """
+    Collect all ancestors of a CUI whose IC >= threshold.
+    Leaf CUI is included only if it meets threshold.
+    """
+    stack = [cui]
+    visited = set()
+    results = []
+
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        current_ic = ic_map.get(current, 0)
+        if current_ic >= threshold:
+            results.append((current, current_ic))
+
+        for parent in parent_map.get(current, []):
+            stack.append(parent)
+
+    return results
+
+
+# Step 5: Process a single CUI
+
+def process_one_cui(cui, parent_map, ic_map, threshold):
+    """
+    Returns all informative ancestors of a CUI as separate rows
+    """
+    try:
+        ancestors = find_informative_ancestors(cui, parent_map, ic_map, threshold)
+        return [
+            {
+                "child_cui": cui,
+                "rolled_up_cui": anc_cui,
+                "child_ic": ic_map.get(cui, 0),
+                "rolled_up_ic": anc_ic
+            }
+            for anc_cui, anc_ic in ancestors
+        ]
+    except Exception as e:
+        print(f"[process_one_cui] Error processing {cui}: {e}")
+        return []
+
+----
+# Step 6: Process text using cached IC/hierarchy
+
+def process_text_cached(text, url, cache: ICHierarchyCache):
+    cuis = get_cuis_from_text(text, url)
+    if not cuis:
+        print("[process_text] No CUIs found.")
+        return pd.DataFrame()
+
+    cache.load()
+
+    # Process in parallel
+    rolled_up = []
+    start_time = time.time()
+    with ThreadPoolExecutor() as executor:
+        futures = [executor.submit(process_one_cui, cui, cache.parent_map, cache.ic_map, cache.threshold) for cui in cuis]
+        for f in futures:
+            rolled_up.extend(f.result())
+    end_time = time.time()
+    print(f"[process_text] Informative ancestors computed for {len(cuis)} CUIs in {end_time - start_time:.2f}s")
+
+    df_result = pd.DataFrame(rolled_up)
+    print(f"[process_text] Total rolled-up rows: {len(df_result)}")
+    print(f"[process_text] Unique child CUIs: {df_result['child_cui'].nunique()}")
+    print(f"[process_text] Unique rolled-up CUIs: {df_result['rolled_up_cui'].nunique()}")
+
+    return df_result
+
+
+# Step 7: Example
+
+if __name__ == "__main__":
+    project_id = project_id 
+    dataset = dataset
+    descendants_table = descendants_table
+    mrrel_table = mrrel_table
+    url = url
+
+    cache = ICHierarchyCache(project_id, dataset, descendants_table, mrrel_table)
+    sample_text = "MRI of head"
+    result_df = process_text_cached(sample_text, url, cache)
+
+    if not result_df.empty:
+        print(f"[Output] Final rolled-up CUI count: {len(result_df)}")
+        output_file = "rolled_up_cuis.csv"
+        result_df.to_csv(output_file, index=False)
+        print(f"[Output] Rolled-up CUIs saved to {output_file}")
+    else:
+        print("[Output] No rolled-up CUIs to save.")
