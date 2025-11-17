@@ -1,0 +1,267 @@
+# I want a method or process that can automatically recognize and label a user’s intent when they submit a medical-related query. so that the system can route the request to the appropriate data retrieval or analysis module (e.g., labs, medications, vitals, etc.) efficiently and accurately.
+
+# Background:
+# As part of enhancing intelligent data routing and automation within the ODE ecosystem, this user story focuses on developing a method to automatically detect and classify the intent of user queries. The objective is to ensure that when users submit medical-related queries — such as those referring to labs, medications, vitals, allergies, or other clinical domains — the system can interpret the request contextually and route it to the appropriate downstream service or data retrieval module.
+
+# This functionality will form the foundation for context-aware processing and intelligent orchestration, enabling ODE services to understand “what” the user wants, not just “what” they said. The method should also provide a confidence score and an explanation of how the intent was determined, to support transparency, explainability, and future evaluation of model accuracy.
+
+# Key Objectives:
+
+# Accurately identify and label the intent of medical queries.
+# Provide a structured output with confidence and interpretability.
+# Handle edge cases such as ambiguous, irrelevant, or multi-intent queries gracefully.
+# Support downstream integration with domain-specific APIs (e.g., Labs, Medications, Allergies, Vitals).
+# Dev Notes
+# Out of scope - Classification of the source note. This logic assumes that another source provides the label for the note.
+
+# 1) Intent Detection
+# The method must detect at least one valid intent per query from the predefined medical intent categories.
+# The output must clearly indicate the detected intent label (e.g., GetLabInformation, GetMedicationInformation, etc.).
+# 2) Confidence Scoring (Query Clarity and Relevance etc.)
+# The method must calculate a confidence score (0–1) based on a defined formula or evaluation mechanism.
+# The confidence output must include a reason/explanation describing how the score was derived.
+# 3) Error Handling
+# If the query is irrelevant or non-medical, the method should return a default intent such as general_or_unknown with a confidence score of 0.0.
+# If the query contains multiple conflicting intents, the method should return unclear_or_multiple with a low confidence score.
+# 4) Output Consistency
+# 5) Documentation - README
+# 6) Discrete sections of logic covered by unit tests
+
+import json
+import re
+from datetime import datetime
+import dateparser.search
+from google import genai
+from google.genai import types
+
+
+class SmartMedicalAdapter:
+    def __init__(self, project_id: str, location: str = "us-central1", model_name: str = "gemini-2.5-flash-lite"):
+        self.client = genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=location,
+        )
+        self.model_name = model_name
+        self.topics = self._load_demo_topics()
+        self.today = datetime.today().strftime("%B %d, %Y")
+
+    def _load_demo_topics(self):
+        return [
+            {
+                "title": "MRI Results",
+                "description": "Patient underwent an MRI scan to investigate neurological symptoms. Results showed mild inflammation in the frontal lobe."
+            },
+            {
+                "title": "Liver Function",
+                "description": "Blood tests revealed elevated liver enzymes. Follow-up tests were scheduled to monitor liver function."
+            },
+            {
+                "title": "Medication History",
+                "description": "Patient was prescribed warfarin and lisinopril. Previous medications included aspirin and metformin."
+            },
+            {
+                "title": "Admission Details",
+                "description": "Patient was admitted on March 12, 2023, following complaints of dizziness and blurred vision."
+            },
+            {
+                "title": "CT Scan",
+                "description": "CT scan of the brain showed no abnormalities. Scan was performed after a minor head injury."
+            }
+        ]
+
+    def _call_model(self, prompt: str) -> str:
+        part = types.Part()
+        part.text = prompt
+
+        contents = [
+            types.Content(
+                role="user",
+                parts=[part]
+            )
+        ]
+
+        generate_content_config = types.GenerateContentConfig(
+            temperature=0.7,
+            top_p=0.95,
+            max_output_tokens=2048,
+        )
+
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=generate_content_config,
+        )
+
+        return response.text.strip()
+
+    def _get_temporal_context(self, query: str) -> str:
+        parsed_dates = dateparser.search.search_dates(query)
+        query_lower = query.lower()
+
+        # Force override if "recent" is present
+        if "recent" in query_lower or "latest" in query_lower:
+            return f"Today's date is: {self.today}. Interpreting 'recent' or 'latest' as today."
+
+        # Otherwise use parsed dates
+        if parsed_dates:
+            extracted = [f"{text} → {dt.strftime('%B %d, %Y')}" for text, dt in parsed_dates]
+            return f"Today's date is: {self.today}. Temporal references found: {', '.join(extracted)}."
+
+        return f"Today's date is: {self.today}."
+
+    def _expand_query(self, query: str) -> str:
+        temporal_context = self._get_temporal_context(query)
+        prompt = f"""
+### System Instruction:
+You are an expert medical AI assistant specialized in medical abbreviations query expansion. Your task is to enhance user queries by expanding medical abbreviations to improve search accuracy.
+
+{temporal_context}
+
+### RULES:
+
+1. Context Integration and Preservation:
+- Expand ambiguous terms (results, tests, levels) based on history.
+- DO NOT use previous queries if current query is complete.
+
+2. Medical Abbreviation Expansion and Handling:
+- Expand common medical abbreviations to their full forms.
+- Use standard medical terminology dictionaries and LOINC codes for any acronyms and abbreviations.
+
+3. Query Enhancement and Validation:
+- Maintain original intent while improving specificity
+- Add relevant timeframes if missing (e.g., "latest", "recent")
+
+If not much context, ignore totally.
+
+Original Question:
+{query}
+
+Expanded Question:
+"""
+        return self._call_model(prompt)
+
+    def _extract_intents_entities(self, query: str) -> dict:
+        temporal_context = self._get_temporal_context(query)
+        prompt = f"""
+You are a medical AI assistant. Extract all possible intents and entities from the clinical query below.
+
+{temporal_context}
+
+### Instructions:
+1. Only consider clinically relevant queries.
+2. If the query is non-medical, unclear, or ambiguous, set:
+   - "intents": []
+   - "entities": []
+
+3. Extract:
+   - intents: a list of short strings (e.g., ["get_imaging_results", "get_medication_history"])
+   - entities: list of key medical terms
+   - formatted_query: a cleaned-up version of the query
+
+Respond ONLY with a valid JSON object. No explanation, no markdown.
+
+Query: "{query}"
+"""
+        response_text = self._call_model(prompt)
+
+        try:
+            json_text_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_text_match:
+                json_text = json_text_match.group(0)
+                return json.loads(json_text)
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return {
+                "intents": [],
+                "entities": [],
+                "formatted_query": query,
+            }
+
+    def _generate_answer(self, query: str, intents: list, entities: list) -> dict:
+        context = "\n".join([f"{t['title']}: {t['description']}" for t in self.topics])
+        temporal_context = self._get_temporal_context(query)
+        prompt = f"""
+You are a medical assistant. Based on the following patient topics, answer the question and identify the most relevant topic title.
+
+{temporal_context}
+
+Intents: {', '.join([str(intent) for intent in intents]) if intents else 'None'}
+Entities: {', '.join([str(entity) for entity in entities]) if entities else 'None'}
+
+Patient Topics:
+{context}
+
+Question:
+{query}
+
+Respond ONLY with a valid JSON object in the following format:
+{{
+  "answer": "...",
+  "matched_topic_title": "..."
+}}
+"""
+        response_text = self._call_model(prompt)
+
+        try:
+            json_text_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_text_match:
+                json_text = json_text_match.group(0)
+                return json.loads(json_text)
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return {
+                "answer": response_text.strip(),
+                "matched_topic_title": None
+            }
+
+    def answer_query(self, query: str) -> dict:
+        expanded_query = self._expand_query(query)
+        extraction = self._extract_intents_entities(expanded_query)
+        intents = extraction.get("intents", [])
+        entities = extraction.get("entities", [])
+        formatted_query = extraction.get("formatted_query", expanded_query)
+
+        answer_data = self._generate_answer(formatted_query, intents, entities)
+        answer = answer_data.get("answer", "")
+        matched_title = answer_data.get("matched_topic_title")
+
+        matched_titles = [matched_title] if matched_title else []
+
+        # Fallback only if LLM failed to identify a topic
+        if not matched_titles:
+            keywords = set(word.lower() for word in re.findall(r'\b\w+\b', expanded_query) if len(word) > 3)
+            topic_scores = []
+
+            for topic in self.topics:
+                topic_text = (topic["title"] + " " + topic["description"]).lower()
+                score = sum(1 for keyword in keywords if re.search(rf'\b{re.escape(keyword)}\b', topic_text))
+                if score > 0:
+                    topic_scores.append((topic["title"], score))
+
+            matched_titles = [title for title, score in sorted(topic_scores, key=lambda x: x[1], reverse=True)[:2]]
+
+        return {
+            "original_query": query,
+            "expanded_query": expanded_query,
+            "formatted_query": formatted_query,
+            "intents": intents,
+            "entities": entities,
+            "matched_topic_titles": matched_titles,
+            "answer": answer,
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    PROJECT_ID = PROJECT_ID
+
+    adapter = SmartMedicalAdapter(project_id=PROJECT_ID, location="us-central1", model_name="gemini-2.5-flash-lite")
+
+    query = "mdeical history for 6 months"
+    response = adapter.answer_query(query)
+
+    print("Original Query:", response["original_query"])
+    print("Expanded Query:", response["expanded_query"])
+    print("Matched Topic Titles:", response["matched_topic_titles"])
+    print("Answer:", response["answer"])
