@@ -61,7 +61,7 @@ class SmartMedicalAdapter:
         )
         return response.text.strip()
 
-    # ------------------------ Medical Domain Check (Point 3) ------------------------
+    # ------------------------ Medical Domain Check ------------------------
     def _is_medical_query(self, query: str) -> bool:
         prompt = f"""
 Determine if the following query is clinically relevant for a medical context.
@@ -77,7 +77,7 @@ Query: {query}
         parsed_dates = dateparser.search.search_dates(query, settings={'RELATIVE_BASE': self.today})
         query_lower = query.lower()
 
-        # Default relative ranges
+        # Default relative ranges for recent/latest
         if "recent" in query_lower or "latest" in query_lower:
             return self.today - timedelta(days=7), self.today
 
@@ -114,17 +114,35 @@ Expanded Query:
 """
         return self._call_model(prompt)
 
-    # ------------------------ Extract Intents and Entities ------------------------
+    # ------------------------ Extract Intents and Entities (Improved) ------------------------
     def _extract_intents_entities(self, query: str) -> dict:
         start_date, end_date = self._get_temporal_context(query)
-        temporal_text = f"Start: {start_date.strftime('%B %d, %Y')}, End: {end_date.strftime('%B %d, %Y')}" if start_date else "No explicit date"
+        temporal_hint = f"Start: {start_date.strftime('%B %d, %Y')}, End: {end_date.strftime('%B %d, %Y')}" if start_date else "No explicit date"
+
         prompt = f"""
-Extract intents and entities from the following medical query:
+You are a highly accurate medical AI assistant. Your job is to extract the user's **intent(s)** and **entities** from the query.
+- Intent: what action or information the user is requesting (e.g., 'get_lab_results', 'schedule_scan', 'medication_history')
+- Entities: relevant medical items like 'MRI', 'CT scan', 'liver function', 'warfarin', etc.
+- Temporal: consider words like 'latest', 'recent', 'last week', 'last month' and map them to start/end dates.
 
-Temporal info: {temporal_text}
-Query: {query}
+Examples:
+Query: "latest MRI"
+Intent: ["get_scan_results"]
+Entities: ["MRI"]
+Query: "blood tests from last month"
+Intent: ["get_lab_results"]
+Entities: ["blood tests"]
+Query: "medication history"
+Intent: ["get_medication_history"]
+Entities: []
 
-Respond ONLY in JSON with keys: intents (list), entities (list), formatted_query (string)
+Now extract intents and entities for the following query:
+
+Temporal context: {temporal_hint}
+Query: "{query}"
+
+Respond ONLY in JSON with keys:
+{{ "intents": [...], "entities": [...], "formatted_query": "..." }}
 """
         response_text = self._call_model(prompt)
         try:
@@ -133,9 +151,10 @@ Respond ONLY in JSON with keys: intents (list), entities (list), formatted_query
                 return json.loads(json_text_match.group(0))
             return json.loads(response_text)
         except json.JSONDecodeError:
+            # Fallback
             return {"intents": [], "entities": [], "formatted_query": query}
 
-    # ------------------------ Topic Filtering (Point 7) ------------------------
+    # ------------------------ Topic Filtering ------------------------
     def _filter_topics(self, query: str, intents: list, entities: list) -> list:
         start_date, end_date = self._get_temporal_context(query)
         relevant_topics = []
@@ -154,7 +173,7 @@ Respond ONLY in JSON with keys: intents (list), entities (list), formatted_query
                 if re.search(r'\b(latest|recent)\b', topic["description"].lower()):
                     relevant_topics.append(topic)
 
-        # 3. Final fallback: pick first topic of the type if still none
+        # 3. Final fallback: pick first topic if still none
         if not relevant_topics:
             relevant_topics = [self.topics[0]] if self.topics else []
 
@@ -188,7 +207,7 @@ Respond ONLY in JSON: {{ "answer": "...", "matched_topic_title": "..." }}
 
     # ------------------------ Main Entry ------------------------
     def answer_query(self, query: str) -> dict:
-        if not self._is_medical_query(query):  # Point 3
+        if not self._is_medical_query(query):
             return {
                 "original_query": query,
                 "expanded_query": None,
@@ -205,7 +224,7 @@ Respond ONLY in JSON: {{ "answer": "...", "matched_topic_title": "..." }}
         entities = extraction.get("entities", [])
         formatted_query = extraction.get("formatted_query", expanded_query)
 
-        relevant_topics = self._filter_topics(formatted_query, intents, entities)  # Point 7
+        relevant_topics = self._filter_topics(formatted_query, intents, entities)
         answer_data = self._generate_answer(formatted_query, intents, entities, relevant_topics)
         matched_title = answer_data.get("matched_topic_title")
         matched_titles = [matched_title] if matched_title else [t["title"] for t in relevant_topics[:1]]
@@ -230,6 +249,7 @@ if __name__ == "__main__":
         "MRI results for last week",
         "latest MRI",
         "recent CT scan",
+        "medication history",
         "What's the weather today?"  # Non-medical
     ]
 
@@ -238,4 +258,6 @@ if __name__ == "__main__":
         print("\n---")
         print("Query:", q)
         print("Matched Topics:", resp["matched_topic_titles"])
+        print("Intents:", resp["intents"])
+        print("Entities:", resp["entities"])
         print("Answer:", resp["answer"])
