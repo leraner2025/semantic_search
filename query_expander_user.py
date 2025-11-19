@@ -124,3 +124,115 @@ if __name__ == "__main__":
 
     # Check updated history
     print("\nUpdated User History:\n", user_query_history[user_id])
+
+
+
+#robust through summarization of previous queries
+
+from vertexai import init as vertexai_init
+from vertexai.generative_models import GenerativeModel
+import json
+
+# ------------------------------
+# Vertex AI Initialization
+# ------------------------------
+vertexai_init(project="YOUR_PROJECT_ID", location="us-central1")
+model = GenerativeModel("gemini-1.5-pro-002")
+
+# ------------------------------
+# User Query History
+# ------------------------------
+user_query_history = {}
+MAX_HISTORY = 15  # Only use last 15 queries for context
+
+# ------------------------------
+# Structured & Accurate Query Expansion
+# ------------------------------
+def expand_query_with_context(user_id: str, new_query: str, max_history=MAX_HISTORY):
+    """
+    Expands a new query using structured insights from the user's past queries.
+    Ensures accuracy and maintains style and reasoning flow.
+    """
+
+    # Fetch past queries for this user
+    past_queries = user_query_history.get(user_id, [])[-max_history:]
+
+    # ---- STEP 1: Summarize past queries into structured context ----
+    summary_prompt = f"""
+SYSTEM:
+You are an AI summarizing a user's past queries into structured insights.
+Use ONLY the past queries to extract:
+
+1. "query_topics": main areas or topics the user focuses on
+2. "reasoning_flow": typical logical sequence or progression
+3. "writing_style": phrasing style (concise/verbose, shorthand/full terms)
+
+PAST QUERIES:
+{past_queries}
+
+Return ONLY JSON with the above 3 keys.
+"""
+    try:
+        summary_raw = model.generate_content(summary_prompt).text
+        summary = json.loads(summary_raw)
+    except Exception:
+        summary = {
+            "query_topics": [],
+            "reasoning_flow": [],
+            "writing_style": "concise"
+        }
+
+    # ---- STEP 2: Expand the new query ----
+    expand_prompt = f"""
+SYSTEM:
+You are a query expansion assistant.
+
+TASK:
+Expand the NEW query using ONLY the user's structured insights:
+- query_topics
+- reasoning_flow
+- writing_style
+
+STRICT RULES:
+- Do NOT add new topics, clinical facts, or unrelated content
+- Maintain the same reasoning progression as previous queries
+- Match the user's style exactly
+- Only reorganize, clarify, and extend the new query logically
+- Keep the expanded query consistent with past queries
+
+--- INPUTS ---
+NEW QUERY:
+{new_query}
+
+USER INSIGHTS:
+{summary}
+
+Return ONLY the expanded query.
+"""
+
+    expanded_query = model.generate_content(expand_prompt).text
+
+    # ---- STEP 3: Update user query history ----
+    user_query_history.setdefault(user_id, []).append(new_query)
+
+    return expanded_query
+
+# ------------------------------
+# Example Usage
+# ------------------------------
+if __name__ == "__main__":
+    user_id = "user_123"
+    user_query_history[user_id] = [
+        "Show hemoglobin trends over last 6 months.",
+        "Review iron studies and ferritin levels.",
+        "Highlight abnormal lab values from last visit."
+    ]
+
+    new_query = "What additional labs should I consider?"
+
+    expanded = expand_query_with_context(user_id, new_query)
+    print("\nExpanded Query:\n", expanded)
+
+    # Updated user history
+    print("\nUpdated User History:\n", user_query_history[user_id])
+
