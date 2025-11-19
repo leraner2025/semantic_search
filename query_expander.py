@@ -1,49 +1,53 @@
+
+from vertexai import init as vertexai_init
 from vertexai.generative_models import GenerativeModel
 import json
 
-model = GenerativeModel("gemini-1.5-pro")
+
+vertexai_init(
+    project="YOUR_PROJECT_ID",  # <-- replace with your GCP project
+    location="us-central1"      # <-- choose your region
+)
+
+# Load enterprise LLM
+model = GenerativeModel("gemini-1.5-pro-002")
 
 
+# ------------------------------
+# LLM Pipeline
+# ------------------------------
 def expand_query_with_physician_history(new_query: str, past_queries: list):
     """
-    Full LLM-only pipeline:
-    STEP 1: Analyze physician's past queries for this patient
-            → extract patterns, reasoning progression, style
-    STEP 2: Expand the new query using ONLY:
-            - new query
-            - extracted insights
-            - without adding ANY new clinical facts
+    Enterprise-ready LLM pipeline:
+    STEP 1: Analyze physician's past queries for a patient.
+    STEP 2: Expand the new query using:
+            - Clinical patterns
+            - Reasoning progression
+            - Physician's style
+    Rules:
+    - No new clinical facts
+    - No diagnoses or recommendations
     """
-    
+
     # ---- STEP 1: ANALYZE PAST QUERIES ----
     analysis_prompt = f"""
 SYSTEM:
-You are an AI model analyzing a physician’s previous queries about a SINGLE PATIENT.
+You are an AI analyzing a physician’s previous queries about a SINGLE PATIENT
+in a HIPAA-compliant environment.
 
 PAST QUERIES:
 {past_queries}
 
 TASK:
-Analyze the past queries and return structured JSON with:
+Return structured JSON with:
 
-1. "clinical_patterns":
-    The consistent medical topics or directions
-    the physician has been exploring for THIS patient.
-
-2. "reasoning_progression":
-    How the physician’s line of questioning has evolved over time.
-
-3. "physician_style":
-    How the physician typically asks questions:
-    - concise / verbose
-    - direct / descriptive
-    - shorthand vs full terminology
-    - phrasing patterns
+1. "clinical_patterns": recurring medical topics or directions
+2. "reasoning_progression": evolution of questioning
+3. "physician_style": phrasing style (concise/verbose, shorthand/full terms)
 
 RULES:
 - Return ONLY proper JSON.
-- Do NOT add any clinical facts.
-- Do NOT interpret lab values, symptoms, or conditions.
+- Do NOT add clinical facts or interpret labs/symptoms.
 """
 
     analysis_raw = model.generate_content(analysis_prompt).text
@@ -53,28 +57,23 @@ RULES:
     reasoning_progression = analysis["reasoning_progression"]
     physician_style = analysis["physician_style"]
 
-    # ---- STEP 2: EXPAND THE NEW QUERY SAFELY ----
+    # ---- STEP 2: EXPAND NEW QUERY ----
     expand_prompt = f"""
 SYSTEM:
 You are a clinical query expansion assistant.
 
-You must expand the NEW query using ONLY:
+Use ONLY:
 - The physician’s clinical patterns
-- Their reasoning progression
-- Their observed style of writing
+- Reasoning progression
+- Observed style
 
-PAST QUERIES WERE ALREADY ANALYZED.
-DO NOT use any clinical data not present in past queries or the new query.
-
-STRICT RULES:
-- NO new clinical findings.
-- NO diagnoses or recommendations.
-- NO invented values or symptoms.
-- Only reorganize, clarify, and extend based on patterns.
-- Follow the physician's style.
+RULES:
+- Do NOT add new clinical findings.
+- Do NOT add diagnoses, recommendations, or symptoms.
+- Expand ONLY via clarification, organization, and continuity.
+- Match the physician’s style.
 
 --- INPUTS ---
-
 NEW QUERY:
 {new_query}
 
@@ -88,11 +87,24 @@ PHYSICIAN STYLE:
 {physician_style}
 
 TASK:
-Expand the NEW query in a way consistent with the physician's style
-and their ongoing line of investigation, but without adding new facts.
-
-Return ONLY the expanded query.
+Return ONLY the expanded query, preserving clinical safety and style.
 """
 
     expanded_query = model.generate_content(expand_prompt).text
     return expanded_query
+
+
+ Example Usage
+# ------------------------------
+if __name__ == "__main__":
+    past_queries = [
+        "Check last 3 hemoglobin values.",
+        "Review iron studies from previous visit.",
+        "Was ferritin low in past labs?",
+        "Look at MCV trend over the past few months."
+    ]
+
+    new_query = "What additional tests should I check?"
+
+    expanded = expand_query_with_physician_history(new_query, past_queries)
+    print("\nExpanded Query:\n", expanded)
