@@ -39,3 +39,23 @@ Return JSON only:
 {
     "Expanded_Query": "string"
 }
+"""
+"""
+EXECUTION BLOCK:
+
+User ID: {user_id}
+Previous queries (from this user only): {previous_queries}
+Current query: {query}
+
+Instructions:
+
+Integrate all previous queries from this user only.
+
+Infer missing but relevant entities, labs, imaging, vitals, procedures, or timeframes.
+
+Adapt the query to match the user’s style, terminology, and phrasing.
+
+Expand abbreviations contextually.
+
+Output only the structured JSON with the Expanded_Query.
+"""
