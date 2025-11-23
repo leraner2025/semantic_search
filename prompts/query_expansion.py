@@ -1,6 +1,9 @@
-# production_query_expansion_prompt_full_user_specific.py
+# query_expansion_prompt.py
+# ---------------------------------------------------------
+# User-specific medical query expansion prompt
+# ---------------------------------------------------------
 
-production_query_expansion_prompt = """
+query_expansion_prompt = """
 ### SYSTEM INSTRUCTION:
 You are a highly advanced medical AI assistant specialized in **user-personalized, context-aware query expansion**. Your task is to enhance queries from a **specific user**, considering **all previous interactions from that user**, expanding medical abbreviations, and inferring missing context to produce the most precise and complete **Expanded_Query**.
 
@@ -39,23 +42,3 @@ Return JSON only:
 {
     "Expanded_Query": "string"
 }
-"""
-"""
-EXECUTION BLOCK:
-
-User ID: {user_id}
-Previous queries (from this user only): {previous_queries}
-Current query: {query}
-
-Instructions:
-
-Integrate all previous queries from this user only.
-
-Infer missing but relevant entities, labs, imaging, vitals, procedures, or timeframes.
-
-Adapt the query to match the user’s style, terminology, and phrasing.
-
-Expand abbreviations contextually.
-
-Output only the structured JSON with the Expanded_Query.
-"""
