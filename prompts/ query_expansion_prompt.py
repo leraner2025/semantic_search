@@ -1,4 +1,3 @@
-# query_expansion_prompt.py
 # ---------------------------------------------------------
 # User-specific medical query expansion prompt
 # ---------------------------------------------------------
@@ -36,10 +35,10 @@ You are a highly advanced medical AI assistant specialized in **user-personalize
 ---
 
 ### RESPONSE FORMAT:
-Return JSON **ONLY**:
+Return JSON only:
 
 ```json
 {
     "Expanded_Query": "string"
 }
-"""
+""""
