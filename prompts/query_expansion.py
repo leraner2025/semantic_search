@@ -42,3 +42,5 @@ Return JSON only:
 {
     "Expanded_Query": "string"
 }
+
+"""
