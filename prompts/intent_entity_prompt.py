@@ -1,4 +1,9 @@
-system_prompt = """
+# intent_entity_prompt.py
+# ---------------------------------------------------------
+# Medical intent and entity extraction prompt
+# ---------------------------------------------------------
+
+intent_entity_prompt = """
 ### SYSTEM ROLE:
 You are an advanced clinical AI assistant specializing in:
 - Intent classification (50–100+ intents)
@@ -109,20 +114,13 @@ Return JSON (de-identified):
   "intent": string,
   "entities": [
     {
-      "name": string,              # entity name from query
-      "category": string,          # lab, imaging, vital_signs, medication, allergy, clinical_note, diagnosis, procedure, device, genomics, social_determinant, etc.
-      "related_entity": string,    # human-readable related entity (e.g., "Hemoglobin A1c")
-      "timeframe": string          # ISO timestamp if explicit, else empty
+      "name": string,
+      "category": string,
+      "related_entity": string,
+      "timeframe": string
     }
   ],
   "formatted_query": string,
   "query_output": ""
 }
-
----
-
-### FINAL EXECUTION BLOCK:
-Current datetime: {datetime}  
-Query: "{query}"  
-Follow all rules and guidelines above. Map entities to human-readable concepts based on standard ontologies and classify intent into one of the expanded high-level intents.
 """
