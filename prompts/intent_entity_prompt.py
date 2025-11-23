@@ -1,4 +1,3 @@
-# intent_entity_prompt.py
 # ---------------------------------------------------------
 # Medical intent and entity extraction prompt
 # ---------------------------------------------------------
