@@ -36,11 +36,10 @@ You are a highly advanced medical AI assistant specialized in **user-personalize
 ---
 
 ### RESPONSE FORMAT:
-Return JSON only:
+Return JSON **ONLY**:
 
 ```json
 {
     "Expanded_Query": "string"
 }
-
 """
