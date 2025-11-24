@@ -1,0 +1,136 @@
+# ---------------------------------------------------------
+# medical_pipeline.py — Robust Version
+# ---------------------------------------------------------
+
+from vertexai import init as vertexai_init
+from vertexai.generative_models import GenerativeModel
+import json
+from datetime import datetime
+import re
+from query_expansion_prompt import query_expansion_prompt
+from intent_entity_prompt import intent_entity_prompt
+from summarization_prompt import summarization_prompt
+
+# -----------------------------
+# Initialize Vertex AI
+# -----------------------------
+vertexai_init(project="YOUR_PROJECT_ID", location="us-central1")
+model = GenerativeModel("gcp-medical-llm-Pro")
+
+# -----------------------------
+# User query history
+# -----------------------------
+user_query_history = {
+    "user42": [
+        "latest HbA1c result",
+        "cholesterol levels last 6 months",
+        "any abnormal MRI findings",
+        "medication history for hypertension",
+        "recent lab results for liver function"
+    ],
+    "user77": [
+        "recent ECG reports",
+        "current medications for diabetes",
+        "blood pressure trends over last year",
+        "any vitamin deficiencies",
+        "allergy history"
+    ],
+    "user99": [
+        "CT scan results of chest",
+        "recent kidney function tests",
+        "previous surgeries and complications",
+        "medications for asthma",
+        "immunization history"
+    ]
+}
+MAX_HISTORY = 20
+
+# -----------------------------
+# Safe JSON parsing helper
+# -----------------------------
+def safe_parse_json(text, fallback=None):
+    """Extracts JSON object from string, returns fallback if fails."""
+    if fallback is None:
+        fallback = {}
+    try:
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    except json.JSONDecodeError:
+        pass
+    return fallback
+
+# -----------------------------
+# Full pipeline
+# -----------------------------
+def medical_pipeline(user_id: str, query: str):
+    """Full medical pipeline execution with safe JSON parsing and output to file."""
+
+    # -----------------------------
+    # STEP 1 — Query Expansion
+    # -----------------------------
+    past_queries = user_query_history.get(user_id, [])[-MAX_HISTORY:]
+
+    filled_expansion_prompt = query_expansion_prompt.format(
+        user_id=user_id,
+        previous_queries=past_queries,
+        query=query
+    )
+    expansion_raw = model.generate_content(filled_expansion_prompt).text
+    expansion_data = safe_parse_json(expansion_raw)
+    expanded_query = expansion_data.get("Expanded_Query", query)
+
+    # Update history
+    user_query_history.setdefault(user_id, []).append(query)
+
+    # -----------------------------
+    # STEP 2 — Intent + Entity Extraction
+    # -----------------------------
+    filled_intent_entity_prompt = intent_entity_prompt.format(
+        datetime=datetime.utcnow().isoformat(),
+        expanded_query=expanded_query
+    )
+    ie_raw = model.generate_content(filled_intent_entity_prompt).text
+    ie_data = safe_parse_json(ie_raw)
+    formatted_query = ie_data.get("formatted_query", expanded_query)
+
+    # -----------------------------
+    # STEP 3 — Summarization
+    # -----------------------------
+    filled_summary_prompt = summarization_prompt.format(
+        formatted_query=formatted_query
+    )
+    summary_raw = model.generate_content(filled_summary_prompt).text
+    summary_data = safe_parse_json(summary_raw)
+    summary_text = summary_data.get("summary", "")
+
+    # -----------------------------
+    # FINAL JSON OUTPUT
+    # -----------------------------
+    output_json = {
+        "input_query": query,
+        "expanded_query": expanded_query,
+        "intent": ie_data.get("intent"),
+        "entities": ie_data.get("entities"),
+        "formatted_query": formatted_query,
+        "summary": summary_text,
+
+        # Used in cui extraction code
+        "cui_processing_input": {
+            "text_for_ner": formatted_query
+        }
+    }
+
+    # Save JSON for downstream processing
+    with open("pipeline_output.json", "w") as f:
+        json.dump(output_json, f, indent=2)
+
+    return output_json
+
+# -----------------------------
+# Example execution
+# -----------------------------
+if __name__ == "__main__":
+    result = medical_pipeline("user42", "bp and labs?")
+    print(json.dumps(result, indent=2))
+    print("\nSaved as pipeline_output.json\n")
