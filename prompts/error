@@ -8,7 +8,6 @@ from summarization_prompt import summarization_prompt
 # Initialize Gemini model
 model = GenerativeModel("gemini-2.5-flash")
 
-# User query history
 user_query_history = {
     "user42": [
         "latest HbA1c result",
@@ -16,65 +15,36 @@ user_query_history = {
         "any abnormal MRI findings",
         "medication history for hypertension",
         "recent lab results for liver function"
-    ],
-    "user77": [
-        "recent ECG reports",
-        "current medications for diabetes",
-        "blood pressure trends over last year",
-        "any vitamin deficiencies",
-        "allergy history"
-    ],
-    "user99": [
-        "CT scan results of chest",
-        "recent kidney function tests",
-        "previous surgeries and complications",
-        "medications for asthma",
-        "immunization history"
     ]
 }
 MAX_HISTORY = 20
 
 
 def safe_parse(raw_text: str, expected_keys: list[str]):
-    """
-    Safely parse JSON from model output.
-    - Removes markdown fences
-    - Handles JSONDecodeError
-    - Normalizes key casing
-    """
     cleaned = raw_text.strip()
     cleaned = cleaned.replace("```json", "").replace("```", "")
 
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        # fallback: wrap raw text in dict
         return {expected_keys[0]: cleaned}
 
-    # normalize keys
     normalized = {k.lower(): v for k, v in data.items()}
-
     result = {}
     for key in expected_keys:
         val = normalized.get(key.lower())
         if val is not None:
             result[key] = val
 
-    # fallback if nothing matched
     if not result:
         result[expected_keys[0]] = cleaned
-
     return result
 
 
 def medical_pipeline(user_id: str, query: str):
-    """Full pipeline execution with JSON file output."""
-
-    # -----------------------------
-    # STEP 1 — Query Expansion
-    # -----------------------------
     past_queries = user_query_history.get(user_id, [])[-MAX_HISTORY:]
 
+    # STEP 1 — Expansion
     filled_expansion_prompt = query_expansion_prompt.format(
         user_id=user_id,
         previous_queries=past_queries,
@@ -87,9 +57,7 @@ def medical_pipeline(user_id: str, query: str):
 
     user_query_history.setdefault(user_id, []).append(query)
 
-    # -----------------------------
-    # STEP 2 — Intent + Entity Extraction
-    # -----------------------------
+    # STEP 2 — Intent/Entity
     filled_intent_entity_prompt = intent_entity_prompt.format(
         datetime=datetime.utcnow().isoformat(),
         expanded_query=expanded_query
@@ -97,12 +65,9 @@ def medical_pipeline(user_id: str, query: str):
     ie_raw = model.generate_content(filled_intent_entity_prompt).text
     print("DEBUG ie_raw:", ie_raw)
     ie_data = safe_parse(ie_raw, ["intent", "entities", "formatted_query"])
-
     formatted_query = ie_data.get("formatted_query", expanded_query)
 
-    # -----------------------------
     # STEP 3 — Summarization
-    # -----------------------------
     filled_summary_prompt = summarization_prompt.format(
         formatted_query=formatted_query
     )
@@ -110,9 +75,6 @@ def medical_pipeline(user_id: str, query: str):
     print("DEBUG summary_raw:", summary_raw)
     summary_data = safe_parse(summary_raw, ["summary"])
 
-    # -----------------------------
-    # FINAL JSON OUTPUT
-    # -----------------------------
     output_json = {
         "input_query": query,
         "expanded_query": expanded_query,
@@ -120,21 +82,15 @@ def medical_pipeline(user_id: str, query: str):
         "entities": ie_data.get("entities"),
         "formatted_query": formatted_query,
         "summary": summary_data.get("summary"),
-        "cui_processing_input": {
-            "text_for_ner": formatted_query
-        }
+        "cui_processing_input": {"text_for_ner": formatted_query}
     }
 
-    # Save JSON for cui extraction code
     with open("pipeline_output.json", "w") as f:
         json.dump(output_json, f, indent=2)
 
     return output_json
 
 
-# -----------------------------
-# Example execution
-# -----------------------------
 if __name__ == "__main__":
     result = medical_pipeline("user42", "bp and labs?")
     print(json.dumps(result, indent=2))
