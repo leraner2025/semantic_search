@@ -54,9 +54,7 @@ def safe_json_parse(raw_text: str, expected_keys: list[str]):
         return {expected_keys[0]: cleaned}
 
     # normalize keys
-    normalized = {}
-    for k, v in data.items():
-        normalized[k.lower()] = v
+    normalized = {k.lower(): v for k, v in data.items()}
 
     result = {}
     for key in expected_keys:
@@ -85,6 +83,7 @@ def medical_pipeline(user_id: str, query: str):
         query=query
     )
     expansion_raw = model.generate_content(filled_expansion_prompt).text
+    print("DEBUG expansion_raw:", expansion_raw)  # inspect model output
     expansion_data = safe_json_parse(expansion_raw, ["Expanded_Query"])
     expanded_query = expansion_data["Expanded_Query"]
 
@@ -98,6 +97,7 @@ def medical_pipeline(user_id: str, query: str):
         expanded_query=expanded_query
     )
     ie_raw = model.generate_content(filled_intent_entity_prompt).text
+    print("DEBUG ie_raw:", ie_raw)
     ie_data = safe_json_parse(ie_raw, ["intent", "entities", "formatted_query"])
 
     formatted_query = ie_data.get("formatted_query", expanded_query)
@@ -109,6 +109,7 @@ def medical_pipeline(user_id: str, query: str):
         formatted_query=formatted_query
     )
     summary_raw = model.generate_content(filled_summary_prompt).text
+    print("DEBUG summary_raw:", summary_raw)
     summary_data = safe_json_parse(summary_raw, ["summary"])
 
     # -----------------------------
