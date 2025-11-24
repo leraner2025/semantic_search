@@ -11,7 +11,31 @@ vertexai_init(project="YOUR_PROJECT_ID", location="us-central1")
 model = GenerativeModel("gcp-medical-llm-Pro")
 
 # User query history
-user_query_history = {}
+# User query history with sample previous queries
+# -----------------------------
+user_query_history = {
+    "user42": [
+        "latest HbA1c result",
+        "cholesterol levels last 6 months",
+        "any abnormal MRI findings",
+        "medication history for hypertension",
+        "recent lab results for liver function"
+    ],
+    "user77": [
+        "recent ECG reports",
+        "current medications for diabetes",
+        "blood pressure trends over last year",
+        "any vitamin deficiencies",
+        "allergy history"
+    ],
+    "user99": [
+        "CT scan results of chest",
+        "recent kidney function tests",
+        "previous surgeries and complications",
+        "medications for asthma",
+        "immunization history"
+    ]
+}
 MAX_HISTORY = 20
 
 def medical_pipeline(user_id: str, query: str):
