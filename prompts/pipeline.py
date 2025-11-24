@@ -65,13 +65,13 @@ def medical_pipeline(user_id: str, query: str):
         "formatted_query": formatted_query,
         "summary": summary_data.get("summary"),
 
-        # 🔥 Code 2 will read this
+        # used in cui extraction code
         "cui_processing_input": {
             "text_for_ner": formatted_query
         }
     }
 
-    # 🔥 Save JSON for code 2
+    # Save JSON for cui extraction code
     with open("pipeline_output.json", "w") as f:
         json.dump(output_json, f, indent=2)
 
