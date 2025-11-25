@@ -1,0 +1,49 @@
+Our Capability Team previously investigated methods to identify the sub-components of user-requested items, often referred to as "intents." This initiative focuses on implementing this logic as a dedicated module designed to:
+Accept an expanded intent as input.
+Output the constituent components that comprise the intent.
+Map these sub-components to CUIs. It's important to note that a single sub-component may be associated with multiple CUIs, and conversely, a group of sub-components might be expressed by a single CUIs
+Dev Notes:
+An "intent" represents a complex informational topic that is typically composed of multiple sub-meanings, each potentially encompassing further sub-components or "sub-natures."
+
+Our prior work involved expanding an intent to achieve greater clarity and then breaking it down into these distinct sub-components. For example, the intent "current medication" can be expanded to "medications being taken as of 11/25/2025" and subsequently broken down into numerous sub-components, such as (this list is illustrative and not exhaustive):
+
+
+Medication name:
+Generic Name
+Brand Name
+Standardized codes
+
+Dosage Information
+Strength
+Dosage
+Form
+Quantity
+
+Administration Instruction
+Prescribing provider
+Date and time of order
+Order type
+Order number
+
+Status and dates
+Start date
+End date
+Medication status
+
+Dispensing information
+Lot number
+Manufacturer
+Expiry date
+
+Patient specific information
+Patient name
+Patient ID
+Allergies
+Diagnoses
+
+Documentation details
+Date and time of administration
+Initials or name of administering or recording the medication
+Confirmation of administration
+
+As mentioned, a single sub-component may correspond to multiple CUIs. Conversely, due to the comprehensive and hierarchical nature of UMLS (Unified Medical Language System), which categorizes and groups complex concepts in various ways, multiple sub-components may be expressible by a single CUI.
