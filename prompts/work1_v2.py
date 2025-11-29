@@ -37,6 +37,12 @@ TASK:
    - LIST of strings if multiple sentences/intents.
    - The formatted query should clearly combine intent + entities + timeframe in a readable clinical style.
 
+STRICT SAFETY RULES (MANDATORY):
+- Never add or infer medical details the user did not explicitly state.
+- Do not hallucinate symptoms, severity, conditions, timelines, or impacts.
+- Use the classification guidelines ONLY to categorize user-provided content.
+- If a detail is not present, do NOT include it.
+
 RULES:
 - Do NOT hallucinate or add extra medical info.
 - Always return strictly JSON with fields: intent, entities, formatted_query
