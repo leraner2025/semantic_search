@@ -47,3 +47,78 @@ Initials or name of administering or recording the medication
 Confirmation of administration
 
 As mentioned, a single sub-component may correspond to multiple CUIs. Conversely, due to the comprehensive and hierarchical nature of UMLS (Unified Medical Language System), which categorizes and groups complex concepts in various ways, multiple sub-components may be expressible by a single CUI.
+Acepetance Criteria : 
+
+Input Handling
+The module shall accept an expanded intent as structured input (e.g., text, JSON, or downstream schema).
+
+The module shall handle intents of varying complexity, including intents with nested meanings or hierarchical sub-components.
+
+Sub-Component Identification
+The module shall break the input intent into a list of sub-components (“sub-natures”) representing the individual conceptual elements.
+
+The module shall preserve hierarchical relationships when the intent naturally contains nested layers (e.g., Medication → Dosage → Strength).
+
+The breakdown must be deterministic: the same intent input must always produce the same list of sub-components.
+
+The module shall avoid adding hallucinated or irrelevant sub-components not supported by the expanded intent.
+
+CUI Mapping Logic
+The module shall map each sub-component to one or more CUIs when appropriate.
+
+The logic shall support cases where:
+
+A single sub-component maps to multiple valid CUIs.
+
+Multiple sub-components are associated with a single shared CUI.
+
+The output must preserve traceability between sub-components and their associated CUIs.
+
+CUIs must be restricted to the vocabularies relevant for downstream matching workflows (e.g., those compatible with “shopping list items”).
+
+Output Structure
+The module shall output a structured breakdown containing:
+
+The list of sub-components.
+
+CUI mappings for each sub-component.
+
+Any hierarchical or grouping relationships.
+
+The output shall follow an agreed-upon ODE format so downstream retrieval and matching modules can consume the results without transformation.
+
+Structure must support both human readability and machine processing.
+
+Quality & Consistency
+The breakdown shall cover all meaningful semantic components of the intent while avoiding over-expansion.
+
+Sub-components must remain linguistically and clinically valid (e.g., “dosage,” “strength,” “start date,” “provider,” etc.).
+
+The logic must be aligned with examples and prior work completed by the Capability Team.
+
+The module shall ensure consistent application of terminology and structural conventions across different intents.
+
+Edge Case Handling
+When an intent is too vague to break down, the module shall return an “insufficient information” signal or a minimal set of high-level sub-components.
+
+When CUI coverage is incomplete or ambiguous, the module shall return all possible CUIs with appropriate indication of uncertainty.
+
+Duplicate or synonymous sub-components shall be merged or normalized.
+
+Performance, Integration & Documentation
+Output must be generated within acceptable performance limits to support pipeline integration.
+
+The module shall expose clear interfaces (e.g., function, class, or API contract) for downstream components.
+
+Documentation shall describe:
+
+Input formats
+
+Output structure
+
+Logic for sub-component identification
+
+Logic for CUI mapping
+
+Edge-case behavior
+
