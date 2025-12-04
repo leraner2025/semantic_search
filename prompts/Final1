@@ -1,0 +1,171 @@
+import json
+from datetime import datetime
+from google.cloud import aiplatform
+from vertexai.generative_models import GenerativeModel
+
+# ======================================================
+# PROMPTS
+# ======================================================
+
+CLINICAL_CLASSIFIER_PROMPT = """
+You are a medical AI assistant. Determine if a user's query is clinical or non-clinical.
+Return JSON ONLY:
+{{
+  "is_clinical": true/false,
+  "reason": "short explanation"
+}}
+User Query: "{query}"
+"""
+
+QUERY_EXPANSION_PROMPT = """
+SYSTEM INSTRUCTION:
+You are a medical AI assistant.
+Expand the user's input query into a full detailed **concise clinical description**.
+Clarify abbreviations and vague terms. Include relevant medical concepts, conditions, or exposures.
+Do not add any assumptions beyond the query context.
+Return JSON ONLY:
+{{
+  "expanded_query": "string"
+}}
+User Input: {query}
+"""
+
+INTENT_EXTRACTION_PROMPT = """
+SYSTEM INSTRUCTION:
+You are a clinical intent extraction engine.
+Task:
+1. Extract all intents from the expanded query.
+2. For each intent, include:
+   - intent_title
+   - description
+   - nature
+   - sub_nature categories with elements and associated entities
+3. For each element/entity, generate a final query derived directly from context.
+4. Do NOT add any manual prefixes/suffixes.
+Return JSON ONLY:
+{{
+  "original_query": "{expanded_query}",
+  "expanded_query": "{expanded_query}",
+  "intents": [
+    {{
+      "intent_title": "string",
+      "description": "string",
+      "nature": "string",
+      "sub_nature": [
+        {{
+          "category": "string",
+          "elements": ["string", "..."],
+          "entities": ["string", "..."]
+        }}
+      ],
+      "final_queries": [
+        {{
+          "string"
+        }}
+      ]
+    }}
+  ]
+}}
+User Input: {expanded_query}
+Timestamp: {timestamp}
+"""
+
+# ======================================================
+# PIPELINE
+# ======================================================
+
+class ContextualIntentPipeline:
+    def __init__(self, project, location="us-central1", model="gemini-2.0-flash"):
+        aiplatform.init(project=project, location=location)
+        self.model = GenerativeModel(model)
+
+    def _call_model(self, prompt):
+        if hasattr(self.model, "session") and self.model.session is not None:
+            self.model.session.reset()  # clears previous conversation context
+        response = self.model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 4096}
+        )
+        return response.text.strip()
+
+    def _safe_json(self, text):
+        try:
+            return json.loads(text)
+        except:
+            start, depth = None, 0
+            for i, ch in enumerate(text):
+                if ch == "{":
+                    if start is None:
+                        start = i
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            return json.loads(text[start:i+1])
+                        except:
+                            pass
+            return {}
+
+    # Step 0: Check if query is clinical
+    def is_clinical_query(self, query):
+        prompt = CLINICAL_CLASSIFIER_PROMPT.format(query=query)
+        raw = self._call_model(prompt)
+        data = self._safe_json(raw)
+        return data.get("is_clinical", False), data.get("reason", "")
+
+    # Step 1: Expand query
+    def expand_query(self, query):
+        prompt = QUERY_EXPANSION_PROMPT.format(query=query)
+        raw = self._call_model(prompt)
+        data = self._safe_json(raw)
+        return data.get("expanded_query", query)
+
+    # Step 2: Extract intents + final queries
+    def extract_intents(self, expanded_query):
+        prompt = INTENT_EXTRACTION_PROMPT.format(
+            expanded_query=expanded_query,
+            timestamp=datetime.utcnow().isoformat()
+        )
+        raw = self._call_model(prompt)
+        data = self._safe_json(raw)
+        return data.get("intents", [])
+
+    # Step 3: Full pipeline
+    def run(self, query):
+        is_clinical, reason = self.is_clinical_query(query)
+        if not is_clinical:
+            return {
+                "original_query": query,
+                "expanded_query": None,
+                "intents": [],
+                "rejected_reason": reason
+            }
+
+        expanded = self.expand_query(query)
+        intents_data = self.extract_intents(expanded)
+
+        return {
+            "original_query": query,
+            "expanded_query": expanded,
+            "intents": intents_data
+        }
+
+
+# ======================================================
+# Example usage
+# ======================================================
+
+if __name__ == "__main__":
+    PROJECT_ID = PROJECT_ID
+    pipeline = ContextualIntentPipeline(project=PROJECT_ID)
+
+    test_queries = [
+        "family history of smoking",
+        "current medications",
+        "vital signs and labs for last 6 months"
+    ]
+
+    for query in test_queries:
+        result = pipeline.run(query)
+        print(json.dumps(result, indent=2))
