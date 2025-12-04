@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from google.cloud import aiplatform
 from vertexai.generative_models import GenerativeModel
@@ -20,9 +21,13 @@ User Query: "{query}"
 QUERY_EXPANSION_PROMPT = """
 SYSTEM INSTRUCTION:
 You are a medical AI assistant.
-Expand the user's input query into a full detailed **concise clinical description**.
+Expand the user's input query into a full detailed **atomic clinical description**.
+Review each and every chunk and words and expand with medical knowledge.
 Clarify abbreviations and vague terms. Include relevant medical concepts, conditions, or exposures.
+Do NOT include verbs like "Analyze", or other instructional phrases.
+Review each and every chunk in the query for an abbreviation or vague and expand with medical knowledge
 Do not add any assumptions beyond the query context.
+Do not hallucinate
 Return JSON ONLY:
 {{
   "expanded_query": "string"
@@ -70,6 +75,8 @@ User Input: {expanded_query}
 Timestamp: {timestamp}
 """
 
+
+
 # ======================================================
 # PIPELINE
 # ======================================================
@@ -86,26 +93,20 @@ class ContextualIntentPipeline:
             prompt,
             generation_config={"temperature": 0.0, "max_output_tokens": 4096}
         )
-        return response.text.strip()
+        return response.text.strip()    
 
     def _safe_json(self, text):
         try:
             return json.loads(text)
         except:
-            start, depth = None, 0
-            for i, ch in enumerate(text):
-                if ch == "{":
-                    if start is None:
-                        start = i
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0 and start is not None:
-                        try:
-                            return json.loads(text[start:i+1])
-                        except:
-                            pass
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except:
+                    return {}
             return {}
+
 
     # Step 0: Check if query is clinical
     def is_clinical_query(self, query):
@@ -160,10 +161,9 @@ if __name__ == "__main__":
     PROJECT_ID = PROJECT_ID
     pipeline = ContextualIntentPipeline(project=PROJECT_ID)
 
-    test_queries = [
-        "family history of smoking",
-        "current medications",
-        "vital signs and labs for last 6 months"
+    test_queries = ["The patient has a family history of diabetes and heart disease.They want their lab results reviewed.They also report fatigue and chest pain and shortness of breath."
+
+
     ]
 
     for query in test_queries:
