@@ -1,0 +1,79 @@
+The purpose of this user story is to implement the CUI compacting logic as part of the CUI Matching feature. This logic was previously designed by the capability team to reduce and consolidate large sets of CUIs that often emerge during the entity-to-CUI matching process.
+
+When entities are extracted from clinical text, the initial CUI list produced by the matching pipeline can be extensive, containing:
+
+Multiple CUIs with overlapping semantic meaning
+
+CUIs from different or lesser-known coding systems
+
+CUIs that represent overly granular or redundant concepts
+
+This volume and redundancy create challenges for downstream workflows such as entity linking, shopping list matching, and clinical concept retrieval.
+
+This story focuses on implementing a compacting module that:
+
+Ingests a raw list of CUIs generated during the CUI Matching workflow
+
+Applies the tree-based reduction logic developed by the capability team to cluster, normalize, and prune redundant CUIs
+
+Outputs a smaller, clinically meaningful, and standardized list of CUIs aligned with the systems used for the ODE retrieval process (e.g., nature breakdown CUIs)
+
+The module may operate at a block level, enabling reduction within localized text sections, but it should also support document-level flexibility.
+The compacted list is essential to ensure that the downstream CUI Matching results remain accurate, efficient, and usable for specialty workflows and final recommendation logic.
+
+----------------------------------------------------------------------------------------------------------
+
+Previous the capability team developed a tree-based logic to reduce the number of CUIS originally extracted from a note, so that the note can be represented by a smaller of CUIS, rather than a large number of CUIS that have overlap semantics. This story focuses on implementing this logic into a module(s) that:
+Takes in a list of CUIS
+Outputs a smaller list of CUIS
+
+Dev Notes:
+Maybe operate at the block level
+A initial list of CUIs extracted from NER-as-a-service may consist of CUIs from multiple lesser known coding systems. The compact list should consider the systems that will be matchable to the shopping list items (i.e. the nature breakdown CUIs) so they can be used in the retrieval process.
+
+
+-----------------------------------------------------------------------------------------------------
+
+Acceptance ccriteria: Input Handling
+Module accepts a list of CUIs from the CUI Matching process.
+
+Supports mixed coding systems without errors.
+
+Compacting Logic
+Implements the tree-based hierarchical reduction logic created by the capability team.
+
+Removes redundant, overlapping, or semantically similar CUIs.
+
+Prioritizes CUIs relevant to downstream ODE retrieval systems (e.g., nature breakdown).
+
+Produces a meaningfully smaller, clinically representative set of CUIs.
+
+Output Requirements
+Returns a compacted list of CUIs optimized for use in subsequent CUI Matching steps.
+
+Output is deterministic and stable for identical inputs.
+
+Quality & Performance
+Compacting logic executes within acceptable performance bounds.
+
+Unit tests validate:
+
+correct pruning behavior
+
+mixed-system inputs
+
+hierarchical reductions
+
+edge cases where few or no CUIs remain
+
+Documentation
+Documentation is added describing:
+
+compacting rules and heuristic logic
+
+input/output format
+
+known limitations
+
+integration points within the CUI Matching workflow
+
