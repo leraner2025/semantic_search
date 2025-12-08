@@ -5,9 +5,6 @@ from typing import Dict, Any, List
 from google.cloud import aiplatform
 from vertexai.generative_models import GenerativeModel
 
-# ======================================================
-# ENHANCED LLM PROMPTS - No Hardcoding
-# ======================================================
 
 QUERY_EXPANSION_PROMPT = """
 You are an expert medical AI assistant specializing in clinical query expansion.
@@ -81,19 +78,11 @@ Each sub_nature must drill down through MULTIPLE classification levels:
 
 ```
 {{
-  "category": "Level 2 - Broad Clinical Domain",
-  "subcategories": [
-    {{
-      "name": "Level 3 - Specific Clinical Area",
-      "subdivisions": [
-        {{
-          "name": "Level 4 - Granular Clinical Concept",
-          "elements": ["Level 5 - Most specific atomic elements"],
-          "entities": ["Medical entity types for ontology mapping"]
-        }}
-      ]
+  "category": "Level 2 - Broad Clinical Domain>>Level 3 - Specific Clinical Area>>",
+    {{          
+      "elements": ["Level 5 - Most specific atomic elements"],
+      "entities": ["Medical entity types for ontology mapping"]      
     }}
-  ],
   "elements": ["Discrete medical concepts at this level"],
   "entities": ["Medical entity types"]
 }}
@@ -327,11 +316,11 @@ The system can detect ANY clinical intent. Common examples include but are NOT l
 - Immunizations
 - ANY OTHER clinical information need
 
-⚠️ Do NOT limit yourself to this list. Extract ANY distinct clinical intent present in the query.
+ Do NOT limit yourself to this list. Extract ANY distinct clinical intent present in the query.
 
 FINAL QUERIES GENERATION - UNIVERSAL PRINCIPLES:
 
-⚠️ CRITICAL: Final queries are generated ONLY from the DEEPEST/LAST LEVEL of your taxonomic hierarchy.
+ CRITICAL: Final queries are generated ONLY from the DEEPEST/LAST LEVEL of your taxonomic hierarchy.
 
 **PRINCIPLE: Queries come from ATOMIC ELEMENTS, not intermediate categories**
 
@@ -622,44 +611,21 @@ Return ONLY valid JSON with refined intents:
 Input Intents: {intents_json}
 """
 
-# ======================================================
-# ENHANCED PIPELINE WITH PURE LLM-BASED PROCESSING
-# ======================================================
 
-class ContextualIntentPipeline:
-    """
-    Production-ready clinical intent extraction pipeline using pure LLM reasoning.
-    No hardcoded logic - fully dynamic and adaptable to any medical query.
-    """
-    
+# Pipeline
+
+
+class ContextualIntentPipeline:    
     def __init__(self, project: str, location: str = "us-central1", 
                  model: str = MODEL_VERSION, 
                  enable_refinement: bool = False):
-        """
-        Initialize the pipeline with GCP Vertex AI.
-        
-        Args:
-            project: GCP project ID
-            location: GCP region
-            model: Vertex AI model name (use flash for speed)
-            enable_refinement: Enable query refinement step (adds ~5-10 seconds)
-        """
+
         aiplatform.init(project=project, location=location)
         self.model = GenerativeModel(model)
         self.enable_refinement = enable_refinement
         
     def _call_model(self, prompt: str, temperature: float = 0.0, max_tokens: int = 8192) -> str:
-        """
-        Call Vertex AI model with error handling.
-        
-        Args:
-            prompt: The prompt to send to the model
-            temperature: Sampling temperature (0.0 for deterministic)
-            max_tokens: Maximum output tokens
-            
-        Returns:
-            Model response as string
-        """
+
         try:
             # Reset session to avoid context carryover
             if hasattr(self.model, "session") and self.model.session is not None:
@@ -670,8 +636,8 @@ class ContextualIntentPipeline:
                 generation_config={
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
-                    "top_p": 0.95,
-                    "top_k": 40
+                    "top_p": 0.8,
+                    "top_k": 10
                 }
             )
             return response.text.strip()
@@ -680,15 +646,7 @@ class ContextualIntentPipeline:
             return "{}"
     
     def _safe_json(self, text: str) -> Dict[str, Any]:
-        """
-        Safely extract and parse JSON from model response.
-        
-        Args:
-            text: Raw model response
-            
-        Returns:
-            Parsed JSON as dictionary
-        """
+
         # Remove markdown code blocks if present
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
@@ -697,7 +655,6 @@ class ContextualIntentPipeline:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # Try to find JSON object in text
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
                 try:
@@ -705,7 +662,6 @@ class ContextualIntentPipeline:
                 except:
                     pass
             
-            # Try to find JSON array in text
             match = re.search(r'\[.*\]', text, re.DOTALL)
             if match:
                 try:
@@ -717,32 +673,13 @@ class ContextualIntentPipeline:
             return {}
     
     def _validate_json_structure(self, data: Dict, required_keys: List[str]) -> bool:
-        """
-        Validate that JSON has required structure.
-        
-        Args:
-            data: Parsed JSON data
-            required_keys: List of required keys
-            
-        Returns:
-            True if valid, False otherwise
-        """
+
         return all(key in data for key in required_keys)
     
-    # ======================================================
     # STEP 1: Query Expansion
-    # ======================================================
     
     def expand_query(self, query: str) -> Dict[str, Any]:
-        """
-        Expand query using LLM reasoning - no hardcoded abbreviations.
-        
-        Args:
-            query: User input query
-            
-        Returns:
-            Dictionary with expanded_query, abbreviations_expanded, concepts_added
-        """
+
         prompt = QUERY_EXPANSION_PROMPT.format(query=query)
         raw_response = self._call_model(prompt)
         data = self._safe_json(raw_response)
@@ -761,22 +698,10 @@ class ContextualIntentPipeline:
             "concepts_added": data.get("concepts_added", [])
         }
     
-    # ======================================================
     # STEP 2: Intent Extraction
-    # ======================================================
     
     def extract_intents(self, original_query: str, expanded_query: str) -> Dict[str, Any]:
-        """
-        Extract intents using pure LLM reasoning - fully dynamic.
-        Also handles clinical classification inline.
-        
-        Args:
-            original_query: Original user query
-            expanded_query: Expanded query from step 1
-            
-        Returns:
-            Dictionary with intents array and metadata
-        """
+
         prompt = INTENT_EXTRACTION_PROMPT.format(
             original_query=original_query,
             expanded_query=expanded_query,
@@ -811,7 +736,7 @@ class ContextualIntentPipeline:
         
         for idx, intent in enumerate(intents):
             if "final_queries" not in intent or not intent["final_queries"]:
-                print(f"⚠️  Warning: Intent {idx + 1} '{intent.get('intent_title', 'Unknown')}' has no final_queries. Skipping.")
+                print(f"  Warning: Intent {idx + 1} '{intent.get('intent_title', 'Unknown')}' has no final_queries. Skipping.")
                 continue
             
             # No minimum requirement - let LLM decide based on complexity
@@ -825,20 +750,11 @@ class ContextualIntentPipeline:
             "expanded_query": data.get("expanded_query", expanded_query)
         }
     
-    # ======================================================
-    # STEP 3: Query Refinement (Optional)
-    # ======================================================
+    
+    # STEP 3: Query Refinement
     
     def refine_queries(self, intents: List[Dict]) -> Dict[str, Any]:
-        """
-        Refine queries for optimal CUI extraction using LLM.
-        
-        Args:
-            intents: Array of extracted intents
-            
-        Returns:
-            Dictionary with refined intents and refinement notes
-        """
+
         if not self.enable_refinement or not intents:
             return {
                 "intents": intents,
@@ -864,21 +780,10 @@ class ContextualIntentPipeline:
             "total_queries": data.get("total_queries", 0)
         }
     
-    # ======================================================
-    # FULL PIPELINE EXECUTION
-    # ======================================================
+    # Pipeline exec
     
     def run(self, query: str, verbose: bool = False) -> Dict[str, Any]:
-        """
-        Execute the complete clinical intent extraction pipeline.
-        
-        Args:
-            query: User input query
-            verbose: Print minimal progress information
-            
-        Returns:
-            Complete pipeline results with all extracted intents and queries
-        """
+
         start_time = datetime.utcnow()
         
         if verbose:
@@ -891,7 +796,7 @@ class ContextualIntentPipeline:
         if verbose:
             print(f"Expanded Query: {expanded_query}")
         
-        # Step 2: Intent Extraction (includes inline clinical classification)
+        # Step 2: Intent Extraction
         intent_result = self.extract_intents(query, expanded_query)
         
         # Check if query was rejected as non-clinical
@@ -914,7 +819,7 @@ class ContextualIntentPipeline:
         
         intents = intent_result.get("intents", [])
         
-        # Step 3: Query Refinement (Optional - disabled by default for speed)
+        # Step 3: Query Refinement
         if self.enable_refinement and intents:
             refinement_result = self.refine_queries(intents)
             intents = refinement_result["intents"]
@@ -935,38 +840,29 @@ class ContextualIntentPipeline:
             "abbreviations_expanded": expansion_result.get("abbreviations_expanded", []),
             "concepts_added": expansion_result.get("concepts_added", []),
             "intents": intents,
-            "is_clinical": True,
-            "statistics": {
-                "total_intents": len(intents),
-                "total_sub_natures": total_sub_natures,
-                "total_queries": total_queries,
-                "avg_queries_per_intent": round(total_queries / len(intents), 2) if intents else 0
-            },
-            "processing_time_seconds": processing_time,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-
+            "is_clinical": True
+            }
+        
 
 if __name__ == "__main__":
-    PROJECT_ID = PROJECT_ID
-    
+    PROJECT_ID = PROJECT_ID    
     pipeline = ContextualIntentPipeline(
         project=PROJECT_ID,
         location="us-central1",
         model=MODEL_VERSION,
-        enable_refinement=False  # Disabled for speed (saves 5-10 seconds)
+        enable_refinement=False
     )
     
-    # Test queries
+# Test queries
     test_queries = [
-        # Clinical queries
-        "The patient has a family history of diabetes and heart disease.They also want their lab results from the past year reviewed. Additionally, they are concerned about recent episodes of fatigue and shortness of breath.",
-        "current medication"
-        # Non-clinical query (should be rejected inline)
+        "Identify the patient’s primary complaint",
+        "Find all lab results and indicate which ones are abnormal.",
+        "Identify any changes in medication during the hospitalization.",
+        "Find all references to imaging studies and their impressions",
+        "Based on the clinical note, describe the likely cause of the patient’s shortness of breath and outline the evidence supporting that conclusion.",
+        "Describe the complete medication management plan, including new prescriptions, dose adjustments, and discontinued drugs, along with the reasons given and dates."
     ]
     
-    # Process each query
     for idx, query in enumerate(test_queries, 1):
         print(f"\n{'='*80}")
         print(f"Query {idx}/{len(test_queries)}")
@@ -974,7 +870,6 @@ if __name__ == "__main__":
         
         result = pipeline.run(query, verbose=True)
         
-        # Save result to file
         output_filename = f"query_result_{idx}.json"
         with open(output_filename, 'w') as f:
             json.dump(result, f, indent=2)
