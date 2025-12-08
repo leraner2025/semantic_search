@@ -624,7 +624,7 @@ class ContextualIntentPipeline:
         self.model = GenerativeModel(model)
         self.enable_refinement = enable_refinement
         
-    def _call_model(self, prompt: str, temperature: float = 0.0, max_tokens: int = 8192) -> str:
+    def _call_model(self, prompt: str, temperature: float = 1, max_tokens: int = 8192) -> str:
 
         try:
             # Reset session to avoid context carryover
@@ -637,7 +637,8 @@ class ContextualIntentPipeline:
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
                     "top_p": 0.95,
-                    "top_k": 40
+                    "top_k": 40,
+                    "seed":23
                 }
             )
             return response.text.strip()
@@ -858,9 +859,10 @@ if __name__ == "__main__":
         "Identify the patient’s primary complaint",
         "Find all lab results and indicate which ones are abnormal.",
         "Identify any changes in medication during the hospitalization.",
-        "Find all references to imaging studies and their impressions"
+        "Find all references to imaging studies and their impressions",
         "Based on the clinical note, describe the likely cause of the patient’s shortness of breath and outline the evidence supporting that conclusion.",
-        "Describe the complete medication management plan, including new prescriptions, dose adjustments, and discontinued drugs, along with the reasons given and dates."
+        "Describe the complete medication management plan, including new prescriptions, dose adjustments, and discontinued drugs, along with the reasons given and dates.",
+        "current medication"
     ]
     
     for idx, query in enumerate(test_queries, 1):
