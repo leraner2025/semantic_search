@@ -979,7 +979,7 @@ Ouput:
 2025-12-09 16:07:20,829 - __main__ - INFO - Initialized EnhancedCUIReducer: 
 2025-12-09 16:07:20,830 - __main__ - INFO - Processing texts...
 2025-12-09 16:07:20,831 - __main__ - INFO - Extracting CUIs from 1 texts...
-2025-12-09 16:08:20,900 - urllib3.connectionpool - WARNING - Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPSConnectionPool(host='cluster-selection-705290722717.us-central1.run.app', port=443): Read timed out. (read timeout=60)")': /cluster_selection
+2025-12-09 16:08:20,900 - urllib3.connectionpool - WARNING - Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPSConnectionPool(host='test.app', port=443): Read timed out. (read timeout=60)")': /cluster_selection
 2025-12-09 16:08:28,045 - __main__ - INFO - Extracted 1729 unique CUIs from 1 texts
 2025-12-09 16:08:28,047 - __main__ - INFO - Starting reduction: 1729 CUIs → target 85.0%
 2025-12-09 16:08:28,048 - __main__ - INFO - Fetching hierarchy depth 1: 1729 CUIs
