@@ -51,11 +51,10 @@ class Config:
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
     
     # Reduction Parameters
-    TARGET_REDUCTION = float(os.getenv("TARGET_REDUCTION", "0.85"))
-    IC_PERCENTILE = float(os.getenv("IC_PERCENTILE", "50.0"))
     SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.88"))
     USE_SEMANTIC_CLUSTERING = os.getenv("USE_SEMANTIC_CLUSTERING", "True").lower() == "true"
-    ADAPTIVE_THRESHOLD = os.getenv("ADAPTIVE_THRESHOLD", "False").lower() == "true"
+    IC_THRESHOLD = float(os.getenv("IC_THRESHOLD", "0.3"))  # fixed threshold for reduction
+
 
 
 @dataclass
@@ -245,8 +244,7 @@ class CUIAPIClient:
         
         logger.info(f"Extracted {len(all_cuis)} total unique CUIs")
         return all_cuis
-
-
+        
 class EnhancedCUIReducer:
     """
     Production-grade CUI reducer with error handling and performance optimization
@@ -287,12 +285,9 @@ class EnhancedCUIReducer:
     def reduce(
         self,
         input_cuis: List[str],
-        target_reduction: float = 0.85,
         ic_threshold: Optional[float] = None,
-        ic_percentile: float = 50.0,
         semantic_threshold: float = 0.88,
         use_semantic_clustering: bool = True,
-        adaptive_threshold: bool = False
     ) -> Tuple[List[str], ReductionStats]:
         """
         Main reduction pipeline with comprehensive error handling
@@ -561,33 +556,27 @@ class EnhancedCUIReducer:
             return {cui: 5.0 for cui in all_cuis}  # Default fallback
     
     def _determine_threshold(
-        self, 
-        ic_scores: Dict, 
-        ic_threshold: Optional[float],
-        ic_percentile: float,
-        adaptive: bool,
-        input_cuis: List[str],
-        hierarchy: Dict,
-        target_reduction: float
-    ) -> float:
-        """Determine IC threshold with error handling"""
-        try:
-            if ic_threshold is not None:
-                return float(ic_threshold)
-            
-            ic_values = list(ic_scores.values())
-            if not ic_values:
-                return 5.0
-            
-            if adaptive:
-                return self._find_adaptive_threshold_safe(
-                    input_cuis, hierarchy, ic_scores, target_reduction
-                )
-            else:
-                return float(np.percentile(ic_values, ic_percentile))
-        except Exception as e:
-            logger.warning(f"Threshold determination failed: {str(e)}, using default 5.0")
-            return 5.0
+    self, 
+    ic_scores: Dict, 
+    ic_threshold: Optional[float],
+    ic_percentile: float,  # can remove this if unused
+    adaptive: bool,         # can remove this if unused
+    input_cuis: List[str],
+    hierarchy: Dict,
+    target_reduction: float  # can remove this if unused
+) -> float:
+    """Use fixed IC threshold (adaptive removed)"""
+    try:
+        if ic_threshold is not None:
+            return float(ic_threshold)
+        
+        # Fallback to a fixed default threshold (e.g., 0.3)
+        return 0.3
+    
+    except Exception as e:
+        logger.warning(f"Threshold determination failed: {str(e)}, using default 0.3")
+        return 0.3
+
     
     def _semantic_rollup_with_ic_safe(
         self,
@@ -712,37 +701,7 @@ class EnhancedCUIReducer:
             return cui_list
 
     
-    def _find_adaptive_threshold_safe(
-        self,
-        cui_list: List[str],
-        hierarchy: Dict,
-        ic_scores: Dict[str, float],
-        target_reduction: float
-    ) -> float:
-        """Find adaptive threshold with error handling"""
-        try:
-            ic_values = sorted(ic_scores.values())
-            if not ic_values:
-                return 5.0
-            
-            for percentile in [50, 40, 30, 25, 20, 15, 10]:
-                try:
-                    threshold = float(np.percentile(ic_values, percentile))
-                    rolled_up = self._semantic_rollup_with_ic_safe(
-                        cui_list, hierarchy, ic_scores, threshold
-                    )
-                    reduction = 1 - len(rolled_up) / len(cui_list)
-                    
-                    if reduction >= target_reduction * 0.9:
-                        logger.info(f"Adaptive threshold: {threshold:.3f} (p{percentile})")
-                        return threshold
-                except Exception:
-                    continue
-            
-            return float(np.percentile(ic_values, 10))
-        except Exception as e:
-            logger.warning(f"Adaptive threshold failed: {str(e)}")
-            return 5.0
+    
     
     def get_cui_descriptions(self, cui_list: List[str]) -> Dict[str, str]:
         """Retrieve descriptions with caching"""
