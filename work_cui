@@ -77,3 +77,22 @@ known limitations
 
 integration points within the CUI Matching workflow
 
+
+
+
+
+
+
+| **Acceptance Criteria**                                                                            | **Fixed IC Threshold**       | **Percentile-based Threshold** | **Target-Reduction Iterative Threshold** | **Comment / Fit**                                                                         |
+| -------------------------------------------------------------------------------------------------- | ---------------------------- | ------------------------------ | ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **Module accepts a list of CUIs from the CUI Matching process**                                    | ✅ Works                      | ✅ Works                        | ✅ Works                                  | All methods can ingest the input list.                                                    |
+| **Supports mixed coding systems without errors**                                                   | ✅ Works                      | ✅ Works                        | ✅ Works                                  | Thresholding doesn’t affect coding system compatibility.                                  |
+| **Implements tree-based hierarchical reduction logic**                                             | ✅ Works                      | ✅ Works                        | ✅ Works                                  | Threshold selection is just a trigger for rollup; logic remains same.                     |
+| **Removes redundant, overlapping, or semantically similar CUIs**                                   | ⚠ Partially                  | ⚠ Better than fixed            | ✅ Fully controlled                       | Fixed threshold may under- or over-rollup; target reduction ensures desired pruning.      |
+| **Prioritizes CUIs relevant to downstream ODE retrieval systems**                                  | ⚠ Depends on IC distribution | ⚠ Partial                      | ✅ Fully controlled                       | Target-reduction can integrate additional prioritization rules.                           |
+| **Produces a meaningfully smaller, clinically representative set of CUIs**                         | ⚠ Often inconsistent         | ⚠ Adaptive, but may vary       | ✅ Guaranteed                             | Iterative reduction ensures target size and clinical meaningfulness.                      |
+| **Returns a compacted list optimized for use in subsequent steps**                                 | ⚠ Sometimes                  | ⚠ Often                        | ✅ Always                                 | Only iterative reduction guarantees consistent downstream-ready list.                     |
+| **Output is deterministic and stable for identical inputs**                                        | ✅ Deterministic              | ✅ Deterministic                | ✅ Deterministic                          | All deterministic if implemented carefully; iterative may require tie-breaking rules.     |
+| **Compacting logic executes within acceptable performance bounds**                                 | ✅ Fastest                    | ✅ Fast                         | ⚠ Slightly slower due to iterations      | Iterative approach may add small overhead, but usually negligible for typical list sizes. |
+| **Unit tests validate pruning behavior, mixed-system inputs, hierarchical reductions, edge cases** | ✅ Testable                   | ✅ Testable                     | ✅ Testable                               | Iterative method allows testing across different reduction percentages.                   |
+| **Documentation describes rules, I/O, limitations, integration points**                            | ✅ Same                       | ✅ Same                         | ✅ Same                                   | No difference; implementation choice only affects heuristic section.                      |
