@@ -46,7 +46,7 @@ class Config:
     # Reduction Parameters
     SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.88"))
     USE_SEMANTIC_CLUSTERING = os.getenv("USE_SEMANTIC_CLUSTERING", "True").lower() == "true"
-    IC_THRESHOLD = float(os.getenv("IC_THRESHOLD", "0.3"))  # fixed threshold for reduction
+    IC_THRESHOLD = float(os.getenv("IC_THRESHOLD", "0.4"))  # fixed threshold for reduction
 @dataclass
 class ReductionStats:
     """Statistics for the reduction process"""
