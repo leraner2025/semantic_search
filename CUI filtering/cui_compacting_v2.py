@@ -294,10 +294,10 @@ class EnhancedCUIReducer:
         input_cuis: List[str],
         target_reduction: float = 0.85,
         ic_threshold: Optional[float] = None,
-        ic_percentile: float = 50.0,
+        ic_percentile: float = 0,
         semantic_threshold: float = 0.88,
         use_semantic_clustering: bool = True,
-        adaptive_threshold: bool = False
+        adaptive_threshold: bool = True
     ) -> Tuple[List[str], ReductionStats]:
         """
         Main reduction pipeline with comprehensive error handling
