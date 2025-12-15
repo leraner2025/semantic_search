@@ -1,8 +1,3 @@
-"""
-  Stage 1: IC-based Semantic Rollup to Lowest Informative Ancestor (50-70%)
-  Stage 2: Semantic Clustering of similar concepts (additional 20-30%)
-"""
-
 import os
 import time
 import numpy as np
@@ -47,7 +42,7 @@ class Config:
     # BigQuery Table Names
     MRREL_TABLE = os.getenv("MRREL_TABLE", mrrel_table)
     CUI_DESCRIPTION_TABLE = os.getenv("CUI_DESCRIPTION_TABLE", cui_desc_table)
-    CUI_EMBEDDINGS_TABLE = os.getenv("CUI_EMBEDDINGS_TABLE", embedding_table)
+    #CUI_EMBEDDINGS_TABLE = os.getenv("CUI_EMBEDDINGS_TABLE", embedding_table)
     CUI_NARROWER_TABLE = os.getenv("CUI_NARROWER_TABLE", descendants_table)
     
     # Performance tuning
@@ -57,8 +52,6 @@ class Config:
     
     # Reduction Parameters
     TARGET_REDUCTION = float(os.getenv("TARGET_REDUCTION", "0.85"))
-    IC_PERCENTILE = float(os.getenv("IC_PERCENTILE", "50.0"))
-    SEMANTIC_THRESHOLD = float(os.getenv("SEMANTIC_THRESHOLD", "0.88"))
     USE_SEMANTIC_CLUSTERING = os.getenv("USE_SEMANTIC_CLUSTERING", "True").lower() == "true"
     ADAPTIVE_THRESHOLD = os.getenv("ADAPTIVE_THRESHOLD", "False").lower() == "true"
 
@@ -956,67 +949,3 @@ if __name__ == "__main__":
     main()
 
 
-Ouput: 
-2025-12-09 16:07:19,904 - __main__ - INFO - Initializing CUI Reduction System...
-2025-12-09 16:07:20,812 - __main__ - INFO - GCP authentication token updated
-2025-12-09 16:07:20,829 - __main__ - INFO - Initialized EnhancedCUIReducer: 
-2025-12-09 16:07:20,830 - __main__ - INFO - Processing texts...
-2025-12-09 16:07:20,831 - __main__ - INFO - Extracting CUIs from 1 texts...
-2025-12-09 16:08:20,900 - urllib3.connectionpool - WARNING - Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ReadTimeoutError("HTTPSConnectionPool(host='test.app', port=443): Read timed out. (read timeout=60)")': /cluster_selection
-2025-12-09 16:08:28,045 - __main__ - INFO - Extracted 1729 unique CUIs from 1 texts
-2025-12-09 16:08:28,047 - __main__ - INFO - Starting reduction: 1729 CUIs → target 85.0%
-2025-12-09 16:08:28,048 - __main__ - INFO - Fetching hierarchy depth 1: 1729 CUIs
-2025-12-09 16:08:28,051 - __main__ - ERROR - Failed to build hierarchy: Property timeout_ms is unknown for <class 'google.cloud.bigquery.job.query.QueryJobConfig'>.
-2025-12-09 16:08:28,051 - __main__ - INFO - Built hierarchy: 1729 CUIs total
-2025-12-09 16:08:28,052 - __main__ - INFO - Computing IC scores...
-2025-12-09 16:08:28,058 - __main__ - INFO - IC scores: 1729 CUIs, range [7.46, 7.46]
-2025-12-09 16:08:28,065 - __main__ - INFO - Stage 1 complete: 1729 CUIs (0.0% reduction)
-2025-12-09 16:08:28,066 - __main__ - INFO - Fetching embeddings for 1729 CUIs...
-2025-12-09 16:08:28,069 - __main__ - ERROR - Clustering failed: Property timeout_ms is unknown for <class 'google.cloud.bigquery.job.query.QueryJobConfig'>.
-2025-12-09 16:08:28,070 - __main__ - INFO - Stage 2 complete: 1729 CUIs (0.0% additional)
-2025-12-09 16:08:28,071 - __main__ - INFO - ✓ Reduction complete: 1729 → 1729 (0.0%)
-2025-12-09 16:08:28,072 - __main__ - INFO - Fetching descriptions...
-2025-12-09 16:08:28,073 - __main__ - ERROR - Failed to fetch descriptions: Property timeout_ms is unknown for <class 'google.cloud.bigquery.job.query.QueryJobConfig'>.
-================================================================================
-ENHANCED CUI REDUCTION RESULTS
-================================================================================
-
- Initial CUIs: 1729
- After IC Rollup: 1729 (0.0%)
- Final CUIs: 1729 (0.0% total)
- IC Threshold: 7.455
- Hierarchy Size: 1729 CUIs
- API Time: 67.22s
- Reduction Time: 0.02s
- Total Time: 67.24s
-
-================================================================================
-SAMPLE RESULTS (first 10)
-================================================================================
- 1. C0495706 (IC=7.46): N/A
- 2. C3662850 (IC=7.46): N/A
- 3. C0494284 (IC=7.46): N/A
- 4. C3875062 (IC=7.46): N/A
- 5. C2874012 (IC=7.46): N/A
- 6. C0743139 (IC=7.46): N/A
- 7. C0837026 (IC=7.46): N/A
- 8. C0589117 (IC=7.46): N/A
- 9. C4272008 (IC=7.46): N/A
-10. C2183119 (IC=7.46): N/A
-
-... and 1719 more CUIs
-
-================================================================================
-Stats JSON:
-{
-  "initial_count": 1729,
-  "after_ic_rollup": 1729,
-  "final_count": 1729,
-  "ic_rollup_reduction_pct": 0.0,
-  "semantic_clustering_reduction_pct": 0.0,
-  "total_reduction_pct": 0.0,
-  "processing_time": 0.024973154067993164,
-  "ic_threshold_used": 7.455298485683291,
-  "hierarchy_size": 1729,
-  "api_call_time": 67.21586203575134
-}
