@@ -294,10 +294,9 @@ class EnhancedCUIReducer:
         input_cuis: List[str],
         target_reduction: float = 0.85,
         ic_threshold: Optional[float] = None,
-        ic_percentile: float = 0,
-        semantic_threshold: float = 0.88,
+        ic_percentile: float = 0,,
         use_semantic_clustering: bool = True,
-        adaptive_threshold: bool = True
+        adaptive_threshold: bool =use_semantic_clustering: bool = True, True
     ) -> Tuple[List[str], ReductionStats]:
         """
         Main reduction pipeline with comprehensive error handling
@@ -644,68 +643,52 @@ class EnhancedCUIReducer:
             return cui_list
     
     def _semantic_clustering_safe(
-        self,
-        cui_list: List[str],
-        ic_scores: Dict[str, float],
-        similarity_threshold: float
-    ) -> List[str]:
-        """Semantic clustering with error handling"""
-        if len(cui_list) <= 1:
-            return cui_list
-        
-        try:
-            logger.info(f"Fetching embeddings for {len(cui_list)} CUIs...")
+    self,
+    cui_list: List[str],
+    ic_scores: Dict[str, float],
+    similarity_threshold: float = 0.0
+) -> List[str]:
+    """
+    Robust hierarchy- and IC-based clustering (non-embedding)
+    
+    CUIs sharing common ancestors are clustered together.
+    Representative CUI for each cluster is chosen as the one with highest IC.
+    """
+    if len(cui_list) <= 1:
+        return cui_list
+    
+    try:
+        child_to_parents = self._hierarchy_cache.get('child_to_parents', {}) if self._hierarchy_cache else {}
+        all_cuis_set = set(cui_list)
+        visited = set()
+        final_cuis = []
+
+        for cui in cui_list:
+            if cui in visited:
+                continue
             
-            query = f"""
-            SELECT REF_CUI as cui, REF_Embedding as embedding
-            FROM `{self.project_id}.{self.dataset_id}.{self.cui_embeddings_table}`
-            WHERE REF_CUI IN UNNEST(@cuis)
-            LIMIT 10000
-            """
+            # Gather CUIs that share at least one ancestor with this CUI
+            ancestors_cui = set(child_to_parents.get(cui, []))
+            cluster = [cui]
             
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ArrayQueryParameter("cuis", "STRING", cui_list)
-                ],
-                timeout_ms=60000
-            )
+            for other_cui in all_cuis_set - {cui}:
+                ancestors_other = set(child_to_parents.get(other_cui, []))
+                # Cluster if they share ancestor
+                if ancestors_cui.intersection(ancestors_other):
+                    cluster.append(other_cui)
             
-            df = self.client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
-            
-            if len(df) == 0:
-                logger.warning("No embeddings found, skipping clustering")
-                return cui_list
-            
-            embeddings = np.vstack(df['embedding'].values)
-            cuis = df['cui'].values
-            
-            logger.info(f"Clustering {len(cuis)} CUIs...")
-            
-            clustering = AgglomerativeClustering(
-                n_clusters=None,
-                distance_threshold=1 - similarity_threshold,
-                metric='cosine',
-                linkage='average'
-            )
-            
-            labels = clustering.fit_predict(embeddings)
-            
-            # Select representatives
-            final_cuis = []
-            for cluster_id in np.unique(labels):
-                cluster_cuis = cuis[labels == cluster_id].tolist()
-                if len(cluster_cuis) == 1:
-                    final_cuis.append(cluster_cuis[0])
-                else:
-                    rep = min(cluster_cuis, key=lambda c: ic_scores.get(c, float('inf')))
-                    final_cuis.append(rep)
-            
-            logger.info(f"Clustered into {len(final_cuis)} groups")
-            return final_cuis
-            
-        except Exception as e:
-            logger.error(f"Clustering failed: {str(e)}")
-            return cui_list
+            # Pick representative CUI with highest IC
+            rep = max(cluster, key=lambda x: ic_scores.get(x, 0))
+            final_cuis.append(rep)
+            visited.update(cluster)
+
+        final_cuis = list(set(final_cuis))
+        logger.info(f"Hierarchy-based clustering reduced {len(cui_list)} → {len(final_cuis)} CUIs")
+        return final_cuis
+
+    except Exception as e:
+        logger.error(f"Hierarchy-based clustering failed: {str(e)}")
+        return cui_list
     
     def _find_adaptive_threshold_safe(
         self,
