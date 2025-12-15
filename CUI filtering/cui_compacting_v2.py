@@ -15,7 +15,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from functools import lru_cache
 import threading
-
+IC_PERCENTILE = 50
+IC_THRESHOLD_MIN = 0.8
+ROLLOUT_DEPTH = 2
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -465,74 +467,95 @@ class EnhancedCUIReducer:
             logger.error(f"Failed to compute IC scores: {str(e)}")
             return {cui: 5.0 for cui in all_cuis}  # Default fallback
     def _determine_threshold(
-    self, 
-    ic_scores: Dict, 
+    self,
+    ic_scores: Dict[str, float],
     ic_threshold: Optional[float],
-    ic_percentile: float,  # can remove this if unused
-    adaptive: bool,         # can remove this if unused
-    input_cuis: List[str],
-    hierarchy: Dict,
-    target_reduction: float  # can remove this if unused
+    ic_percentile: float = 50.0,
+    adaptive: bool = False,
+    input_cuis: List[str] = None,
+    hierarchy: Dict = None,
+    target_reduction: float = None
 ) -> float:
-    """Use fixed IC threshold (adaptive removed)"""
+    """
+    Robust IC threshold selection.
+    Defaults to percentile-based thresholding.
+    """
+
     try:
         if ic_threshold is not None:
             return float(ic_threshold)
-        
-        # Fallback to a fixed default threshold (e.g., 0.3)
-        return 0.3
-    
+
+        values = np.array(list(ic_scores.values()))
+        values = values[~np.isnan(values)]
+
+        if len(values) == 0:
+            return 0.5
+
+        # Percentile-based threshold (robust across hierarchy sizes)
+        threshold = float(np.percentile(values, ic_percentile))
+
+        # Clamp to safe bounds
+        threshold = max(0.5, min(threshold, np.max(values)))
+
+        logger.info(
+            f"IC threshold set to {threshold:.3f} "
+            f"(percentile={ic_percentile})"
+        )
+
+        return threshold
+
     except Exception as e:
-        logger.warning(f"Threshold determination failed: {str(e)}, using default 0.3")
-        return 0.3
+        logger.warning(
+            f"IC threshold determination failed: {e}. "
+            f"Using safe default 0.8"
+        )
+        return 0.8
+
     def _semantic_rollup_with_ic_safe(
-        self,
-        cui_list: List[str],
-        hierarchy: Dict,
-        ic_scores: Dict[str, float],
-        ic_threshold: float
-    ) -> List[str]:
-        """Semantic rollup with error handling"""
+    self,
+    cui_list: List[str],
+    hierarchy: Dict,
+    ic_scores: Dict[str, float],
+    ic_threshold: float,
+    max_depth: int = 2
+) -> List[str]:
+    """
+    IC-aware, depth-limited rollup.
+    """
+
+    child_to_parents = hierarchy.get("child_to_parents", {})
+    rolled = {}
+
+    for cui in cui_list:
         try:
-            child_to_parents = hierarchy.get('child_to_parents', {})
-            rolled_up = {}
-            
-            for cui in cui_list:
-                try:
-                    # Get ancestors with BFS
-                    ancestors = []
-                    visited = set()
-                    queue = deque([cui])
-                    
-                    while queue and len(visited) < 100:  # Limit for safety
-                        current = queue.popleft()
-                        if current in visited:
-                            continue
-                        visited.add(current)
-                        
-                        for parent in child_to_parents.get(current, []):
-                            if parent not in visited:
-                                ancestors.append(parent)
-                                queue.append(parent)
-                    
-                    # Find LIA
-                    candidates = [cui] + ancestors
-                    valid = [c for c in candidates if ic_scores.get(c, 0) >= ic_threshold]
-                    
-                    if valid:
-                        rolled_up[cui] = min(valid, key=lambda c: ic_scores.get(c, float('inf')))
-                    else:
-                        rolled_up[cui] = cui
-                        
-                except Exception as e:
-                    logger.debug(f"Rollup failed for {cui}: {str(e)}")
-                    rolled_up[cui] = cui
-            
-            return list(set(rolled_up.values()))
-            
-        except Exception as e:
-            logger.error(f"Semantic rollup failed: {str(e)}")
-            return cui_list
+            best = cui
+            best_ic = ic_scores.get(cui, float("inf"))
+
+            queue = deque([(cui, 0)])
+            visited = set()
+
+            while queue:
+                current, depth = queue.popleft()
+
+                if depth > max_depth or current in visited:
+                    continue
+
+                visited.add(current)
+                ic = ic_scores.get(current, 0)
+
+                if ic >= ic_threshold and ic < best_ic:
+                    best = current
+                    best_ic = ic
+
+                for parent in child_to_parents.get(current, []):
+                    queue.append((parent, depth + 1))
+
+            rolled[cui] = best
+
+        except Exception:
+            rolled[cui] = cui
+
+    return list(set(rolled.values()))
     
     def _semantic_clustering_safe(
         self,
