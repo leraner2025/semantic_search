@@ -1,157 +1,51 @@
-
+# ============================================================
+# STANDARD LIBRARIES
+# ============================================================
+import logging
+import time
+import threading
+import subprocess
+import re
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Tuple, Optional, Set, Iterable, Any
+from collections import defaultdict, deque
 
 # ============================================================
-# LOGGING
+# THIRD PARTY
 # ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+import numpy as np
+import requests
+import networkx as nx
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from google.cloud import bigquery
+from sklearn.cluster import AgglomerativeClustering
+
+# -------------------------
+# Logging
+# -------------------------
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# ---------------- CODE 1 : SUBNET API CLIENT ----------------
-# ============================================================
-
-CUI_RE = re.compile(r"^C\d{7}(?:-\d+)?$")
-
-class AugmentCUI:
-    """
-    Subnet API client (fully inlined from Code 1)
-    """
-
-    def __init__(self, url: str):
-        self.url = url.rstrip("/")
-
-    def get_token(self) -> Dict[str, str]:
-        try:
-            result = subprocess.run(
-                ["gcloud", "auth", "print-identity-token"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr)
-
-            token = result.stdout.strip()
-            return {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
-        except Exception as e:
-            raise RuntimeError(f"Failed to retrieve identity token: {e}")
-
-    def get_subnet(
-        self,
-        input_cuis: Iterable[str],
-        limit_context: Optional[List[str]] = None,
-        cross_context: bool = False,
-    ) -> Any:
-
-        payload = {
-            "cuis": list(input_cuis),
-            "cross_context": cross_context,
-        }
-        if limit_context is not None:
-            payload["limit_context"] = limit_context
-
-        headers = self.get_token()
-        response = requests.post(
-            f"{self.url}/subnet/",
-            headers=headers,
-            json=payload,
-            timeout=60,
-        )
-        response.raise_for_status()
-        return response.json().get("output")
-
-
-# ============================================================
-# ---------------- MRCONSO FILTER ----------------
-# ============================================================
-def filter_allowed_cuis(
-    cuis: Set[str],
-    project_id: str,
-    dataset_id: str,
-) -> List[str]:
-    if not cuis:
-        return []
-
-    try:
-        client = bigquery.Client(project=project_id)
-        query = f"""
-        SELECT DISTINCT CUI
-        FROM `{project_id}.{dataset_id}.MRCONSO`
-        WHERE CUI IN UNNEST(@cuis)
-          AND SAB IN (
-            'ICD10','ICD10CM','ICD10PCS','ICD9CM',
-            'SNOMEDCT_US','LOINC'
-          )
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("cuis", "STRING", list(cuis))
-            ]
-        )
-        df = client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
-        return df["CUI"].tolist()
-
-    except Exception as e:
-        logger.error(f"SAB filtering failed: {e}")
-        return []
-
-
-# ============================================================
-# ---------------- REDUCTION STATS ----------------
-# ============================================================
-@dataclass
-class ReductionStats:
-    initial_count: int
-    after_ic_rollup: int
-    final_count: int
-    ic_rollup_reduction_pct: float
-    semantic_clustering_reduction_pct: float
-    total_reduction_pct: float
-    processing_time: float
-    ic_threshold_used: float
-    hierarchy_size: int
-    api_call_time: float = 0.0
-
-    def to_dict(self):
-        return asdict(self)
-
-
-# ============================================================
-# ---------------- CUI EXTRACTION API ----------------
-# ============================================================
+# -------------------------
+# CUI Extraction API Client
+# -------------------------
 class CUIAPIClient:
-
     _token_lock = threading.Lock()
     _cached_token = None
     _token_expiry = 0
 
-    def __init__(self, api_base_url: str, timeout: int = 60, top_k: int = 3):
+    def __init__(self, api_base_url: str, timeout: int = 60, top_k: int = 5):
         self.api_base_url = api_base_url.rstrip("/")
         self.timeout = timeout
         self.top_k = top_k
-
         self.session = requests.Session()
-        adapter = HTTPAdapter(
-            max_retries=Retry(
-                total=3,
-                backoff_factor=1,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["POST"],
-            )
-        )
-        self.session.mount("https://", adapter)
-        self._refresh_token()
 
-    def _refresh_token(self, force=False):
+    def _refresh_token(self):
         with self._token_lock:
             now = time.time()
-            if not force and self._cached_token and now < self._token_expiry:
+            if self._cached_token and now < self._token_expiry:
                 return self._cached_token
 
             result = subprocess.run(
@@ -162,7 +56,7 @@ class CUIAPIClient:
             token = result.stdout.strip()
             self._cached_token = {
                 "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
+                "Content-Type": "application/json"
             }
             self._token_expiry = now + 3300
             return self._cached_token
@@ -175,7 +69,7 @@ class CUIAPIClient:
             self.api_base_url,
             json=payload,
             headers=headers,
-            timeout=self.timeout,
+            timeout=self.timeout
         )
         response.raise_for_status()
         data = response.json()
@@ -183,213 +77,287 @@ class CUIAPIClient:
         cuis = set()
         for t in texts:
             cuis.update(map(str, data.get(t, [])))
+        logger.info(f"Extracted {len(cuis)} CUIs")
         return cuis
 
+# -------------------------
+# Filter CUIs by allowed vocabularies
+# -------------------------
+def filter_allowed_cuis(cuis: Set[str], project_id: str, dataset_id: str) -> List[str]:
+    if not cuis:
+        return []
+    try:
+        client = bigquery.Client(project=project_id)
+        query = f"""
+        SELECT DISTINCT CUI
+        FROM `{project_id}.{dataset_id}.MRCONSO`
+        WHERE CUI IN UNNEST(@cuis)
+          AND SAB IN ('ICD10', 'ICD9', 'SNOMEDCT_US', 'LOINC')
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", list(cuis))]
+        )
+        df = client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
+        allowed_cuis = df['CUI'].tolist()
+        logger.info(f"{len(allowed_cuis)} CUIs allowed after SAB filtering")
+        return allowed_cuis
+    except Exception as e:
+        logger.error(f"Failed to filter CUIs by SAB: {str(e)}")
+        return []
 
-# ============================================================
-# ---------------- SUBNET-BASED REDUCER ----------------
-# ============================================================
-class EnhancedCUIReducer:
+# -------------------------
+# Group by Semantic Type
+# -------------------------
+def group_cuis_by_semantic_type(client: bigquery.Client, project_id: str,
+                                dataset_id: str, cuis: List[str], batch_size=5000) -> Dict[str, List[str]]:
+    groups = defaultdict(list)
+    for i in range(0, len(cuis), batch_size):
+        batch = cuis[i:i + batch_size]
+        query = f"""
+        SELECT CUI, TUI
+        FROM `{project_id}.{dataset_id}.MRSTY`
+        WHERE CUI IN UNNEST(@cuis)
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", batch)]
+        )
+        df = client.query(query, job_config=job_config).result().to_dataframe()
+        for _, row in df.iterrows():
+            groups[row["TUI"]].append(row["CUI"])
+    logger.info(f"Grouped into {len(groups)} semantic types")
+    return groups
 
-    def __init__(
-        self,
-        project_id: str,
-        dataset_id: str,
-        subnet_api_url: str,
-        cui_embeddings_table: str,
-    ):
-        self.project_id = project_id
-        self.dataset_id = dataset_id
+# -------------------------
+# Subnet API for hierarchy
+# -------------------------
+class SubnetAPIClient:
+    def __init__(self, subnet_url: str):
+        self.url = subnet_url.rstrip("/")
 
-        self.client = bigquery.Client(project=project_id)
-        self.cui_embeddings_table = cui_embeddings_table
+    def _get_token(self):
+        result = subprocess.run(
+            ["gcloud", "auth", "print-identity-token"],
+            stdout=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        token = result.stdout.strip()
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-        self.subnet_client = AugmentCUI(subnet_api_url)
-
-        self._hierarchy_cache = None
-        self._ic_scores_cache = None
-
-    def _build_hierarchy_safe(self, cuis: List[str]) -> Dict:
-        if self._hierarchy_cache:
-            return self._hierarchy_cache
-
+    def get_subnet(self, cuis: List[str]) -> Dict:
+        headers = self._get_token()
+        payload = {"cuis": cuis, "cross_context": False}
+        response = requests.post(f"{self.url}/subnet/", json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        nodes, edges = response.json().get("output")
         child_to_parents = defaultdict(list)
         parent_to_children = defaultdict(list)
         all_cuis = set(cuis)
-
-        logger.info("Fetching hierarchy via subnet API...")
-        subnet = self.subnet_client.get_subnet(cuis)
-        nodes, edges = subnet
-
         for parent, child in edges:
             parent_to_children[parent].append(child)
             child_to_parents[child].append(parent)
             all_cuis.update([parent, child])
+        return {"child_to_parents": dict(child_to_parents),
+                "parent_to_children": dict(parent_to_children),
+                "all_cuis": all_cuis}
 
-        hierarchy = {
-            "child_to_parents": dict(child_to_parents),
-            "parent_to_children": dict(parent_to_children),
-            "all_cuis": all_cuis,
-        }
+# -------------------------
+# Compute IC scores
+# -------------------------
+def compute_ic_scores(hierarchy: Dict) -> Dict[str, float]:
+    parent_to_children = hierarchy["parent_to_children"]
+    all_cuis = hierarchy["all_cuis"]
+    total = len(all_cuis)
+    descendant_counts = {}
 
-        self._hierarchy_cache = hierarchy
-        return hierarchy
+    def dfs(cui):
+        if cui in descendant_counts:
+            return descendant_counts[cui]
+        count = 0
+        for ch in parent_to_children.get(cui, []):
+            count += 1 + dfs(ch)
+        descendant_counts[cui] = count
+        return count
 
-    def _compute_ic_scores_safe(self, hierarchy: Dict) -> Dict[str, float]:
-        if self._ic_scores_cache:
-            return self._ic_scores_cache
+    for cui in all_cuis:
+        dfs(cui)
 
-        parent_to_children = hierarchy["parent_to_children"]
-        all_cuis = hierarchy["all_cuis"]
-        total = len(all_cuis)
+    ic_scores = {cui: -np.log((descendant_counts[cui] + 1) / total) for cui in all_cuis}
+    return ic_scores
 
-        descendant_counts = {}
+# -------------------------
+# Rollup LIA + MIA
+# -------------------------
+def rollup_cuis(cuis: List[str], hierarchy: Dict, ic_scores: Dict[str, float], ic_threshold: float):
+    child_to_parents = hierarchy["child_to_parents"]
+    parent_to_children = hierarchy["parent_to_children"]
+    rolled = set()
 
-        def dfs(cui):
-            if cui in descendant_counts:
-                return descendant_counts[cui]
-            count = 0
-            for ch in parent_to_children.get(cui, []):
-                count += 1 + dfs(ch)
-            descendant_counts[cui] = count
-            return count
+    for cui in cuis:
+        # LIA: Least Informative Ancestor
+        queue = deque([cui])
+        visited = set()
+        while queue:
+            cur = queue.popleft()
+            for p in child_to_parents.get(cur, []):
+                if p not in visited:
+                    visited.add(p)
+                    queue.append(p)
+        lia_candidates = [c for c in visited if ic_scores.get(c, 0) >= ic_threshold]
 
-        for cui in all_cuis:
-            dfs(cui)
+        # MIA: Most Informative Descendants
+        queue = deque([cui])
+        visited = set()
+        while queue:
+            cur = queue.popleft()
+            for ch in parent_to_children.get(cur, []):
+                if ch not in visited:
+                    visited.add(ch)
+                    queue.append(ch)
+        mia_candidates = [c for c in visited if ic_scores.get(c, 0) >= ic_threshold]
 
-        ic_scores = {
-            cui: -np.log((descendant_counts[cui] + 1) / total)
-            for cui in all_cuis
-        }
+        rolled.update(lia_candidates + mia_candidates + [cui])
 
-        self._ic_scores_cache = ic_scores
-        return ic_scores
+    # Remove duplicates and ancestor/descendant overlaps
+    final_set = set(rolled)
+    for cui in list(final_set):
+        descendants = set()
+        queue = deque([cui])
+        while queue:
+            queue.extend(parent_to_children.get(queue.popleft(), []))
+            descendants.update(queue)
+        final_set -= descendants
 
-    def _semantic_rollup(self, cuis, hierarchy, ic_scores, threshold):
-        child_to_parents = hierarchy["child_to_parents"]
-        rolled = {}
+    return list(final_set)
 
-        for cui in cuis:
-            visited = set()
-            queue = deque([cui])
-            candidates = [cui]
+# -------------------------
+# Cluster by embeddings & pick far-from-median representatives
+# -------------------------
+def cluster_and_select_diverse_representatives(grouped_cuis: Dict[str, List[str]],
+                                               embeddings: Dict[str, np.ndarray],
+                                               similarity_threshold: float = 0.88,
+                                               distance_from_median_threshold: float = 0.5) -> List[str]:
+    final_cuis = []
+    for tui, cuis in grouped_cuis.items():
+        valid_cuis = [c for c in cuis if c in embeddings]
+        if not valid_cuis:
+            continue
+        vectors = np.vstack([embeddings[c] for c in valid_cuis])
 
-            while queue:
-                cur = queue.popleft()
-                for p in child_to_parents.get(cur, []):
-                    if p not in visited:
-                        visited.add(p)
-                        candidates.append(p)
-                        queue.append(p)
-
-            valid = [c for c in candidates if ic_scores.get(c, 0) >= threshold]
-            rolled[cui] = min(valid, key=lambda c: ic_scores[c]) if valid else cui
-
-        return list(set(rolled.values()))
-
-    def _semantic_clustering(self, cuis, ic_scores, threshold):
-        if len(cuis) <= 1:
-            return cuis
-
-        query = f"""
-        SELECT REF_CUI as cui, REF_Embedding as embedding
-        FROM `{self.project_id}.{self.dataset_id}.{self.cui_embeddings_table}`
-        WHERE REF_CUI IN UNNEST(@cuis)
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", cuis)]
-        )
-        df = self.client.query(query, job_config=job_config).result().to_dataframe()
-
-        if df.empty:
-            return cuis
-
-        embeddings = np.vstack(df["embedding"])
-        labels = AgglomerativeClustering(
+        clustering = AgglomerativeClustering(
             n_clusters=None,
+            distance_threshold=1 - similarity_threshold,
             metric="cosine",
-            linkage="average",
-            distance_threshold=1 - threshold,
-        ).fit_predict(embeddings)
-
-        final = []
-        for label in np.unique(labels):
-            cluster = df["cui"][labels == label].tolist()
-            final.append(min(cluster, key=lambda c: ic_scores.get(c, float("inf"))))
-
-        return final
-
-    def reduce(self, cuis, ic_percentile=50, semantic_threshold=0.88):
-        start = time.time()
-
-        hierarchy = self._build_hierarchy_safe(cuis)
-        ic_scores = self._compute_ic_scores_safe(hierarchy)
-        threshold = np.percentile(list(ic_scores.values()), ic_percentile)
-
-        rolled = self._semantic_rollup(cuis, hierarchy, ic_scores, threshold)
-        final = self._semantic_clustering(rolled, ic_scores, semantic_threshold)
-
-        stats = ReductionStats(
-            initial_count=len(cuis),
-            after_ic_rollup=len(rolled),
-            final_count=len(final),
-            ic_rollup_reduction_pct=(1 - len(rolled) / len(cuis)) * 100,
-            semantic_clustering_reduction_pct=(1 - len(final) / len(rolled)) * 100,
-            total_reduction_pct=(1 - len(final) / len(cuis)) * 100,
-            processing_time=time.time() - start,
-            ic_threshold_used=threshold,
-            hierarchy_size=len(hierarchy["all_cuis"]),
+            linkage="average"
         )
+        labels = clustering.fit_predict(vectors)
 
-        return final, stats
+        for label in np.unique(labels):
+            cluster_indices = np.where(labels == label)[0]
+            cluster_cuis = [valid_cuis[i] for i in cluster_indices]
+            cluster_vectors = vectors[cluster_indices]
 
+            median_vector = np.median(cluster_vectors, axis=0)
+            norm = np.linalg.norm(cluster_vectors, axis=1) * np.linalg.norm(median_vector)
+            norm[norm == 0] = 1e-10
+            cosine_sim = np.dot(cluster_vectors, median_vector) / norm
+            cosine_dist = 1 - cosine_sim
 
-# ============================================================
-# ---------------- MAIN ----------------
-# ============================================================
+            selected = [cluster_cuis[i] for i, dist in enumerate(cosine_dist)
+                        if dist >= distance_from_median_threshold]
+            if not selected:
+                selected = [cluster_cuis[0]]
+
+            final_cuis.extend(selected)
+
+    return sorted(set(final_cuis))
+
+# -------------------------
+# Main pipeline
+# -------------------------
 def main():
-    # -------- CONFIG --------
     PROJECT_ID = project_id
     DATASET_ID = dataset
+    EMBEDDING_TABLE = embedding_table
     CUI_API_URL = url
     SUBNET_API_URL = subnet
-    EMBEDDING_TABLE = embedding_table
 
-    TEXTS = ["Tumor size impacts symptoms"]
+    texts = ["Tumor size impacts symptoms"]
 
-    # -------- EXTRACT CUIS --------
+    # Step 1: Extract CUIs
     extractor = CUIAPIClient(CUI_API_URL)
-    extracted_cuis = extractor.extract_cuis_batch(TEXTS)
-    logger.info(f"Extracted {len(extracted_cuis)} CUIs")
+    raw_cuis = extractor.extract_cuis_batch(texts)
 
-    # -------- FILTER --------
-    filtered_cuis = filter_allowed_cuis(extracted_cuis, PROJECT_ID, DATASET_ID)
-    logger.info(f"{len(filtered_cuis)} CUIs after filtering")
-
+    # Step 2: Filter by allowed vocabularies
+    filtered_cuis = filter_allowed_cuis(raw_cuis, PROJECT_ID, DATASET_ID)
+    logger.info(f"Filtered CUIs count: {len(filtered_cuis)}")
     if not filtered_cuis:
-        logger.warning("No CUIs to reduce")
         return
 
-    # -------- REDUCE --------
-    reducer = EnhancedCUIReducer(
-        project_id=PROJECT_ID,
-        dataset_id=DATASET_ID,
-        subnet_api_url=SUBNET_API_URL,
-        cui_embeddings_table=EMBEDDING_TABLE,
-    )
+    # Step 3: Group by semantic type
+    client = bigquery.Client(project=PROJECT_ID)
+    grouped_cuis = group_cuis_by_semantic_type(client, PROJECT_ID, DATASET_ID, filtered_cuis)
 
-    reduced_cuis, stats = reducer.reduce(filtered_cuis)
+    # Step 4: Build hierarchy & compute IC
+    subnet_client = SubnetAPIClient(SUBNET_API_URL)
+    hierarchy = subnet_client.get_subnet(filtered_cuis)
+    ic_scores = compute_ic_scores(hierarchy)
+    ic_threshold = np.percentile(list(ic_scores.values()), 50)  # configurable
 
-    # -------- OUTPUT --------
-    print("\nInitial CUIs:", filtered_cuis)
-    print("\nReduced CUIs:", reduced_cuis)
-    print("\nStats:")
-    for k, v in stats.to_dict().items():
-        print(f"  {k}: {v}")
+    # Step 5-7: LIA + MIA + deduplication
+    rolled_cuis = rollup_cuis(filtered_cuis, hierarchy, ic_scores, ic_threshold)
 
+    # Step 8: Load embeddings (pseudo: replace with your embeddings loader)
+    embeddings = {}  # {CUI: np.ndarray}
+    # TODO: Load only for rolled_cuis from your BigQuery embeddings table
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
+    # Step 9-10: Cluster & select diverse representatives
+    final_cuis = cluster_and_select_diverse_representatives({ "all": rolled_cuis }, embeddings)
+
+    logger.info(f"Final Reduced CUIs ({len(final_cuis)}): {final_cuis}")
+
 if __name__ == "__main__":
     main()
+-------------------------------------------------------
+Pipeline Outline
+
+NER → CUIs
+ CUI extraction API for the input texts.
+
+Filter by allowed vocabularies
+    Use MRCONSO table to keep only ICD, SNOMED, LOINC.
+
+Group by semantic type
+    Use MRSTY to group CUIs by their semantic type (TUI).
+    
+use Subnetwork API to get the cui relationship (ancessots and decendents)
+
+for each group, Compute IC scores
+    Build hierarchy from above Subnet API → compute Information Content (IC) for each CUI.
+
+Select LIA (Least Informative Ancestors)
+
+    For each cluster: find most general ancestors in hierarchy.
+
+    Keep only those with IC ≥ threshold.
+
+Select MIA (Most Informative Ancestors)
+
+    For each cluster: find most specific descendants.
+
+Keep only those with IC ≥ threshold.
+
+    Combine LIA + MIA selections
+
+Remove duplicates and CUIs that are ancestors/descendants of each other to reduce redundancy.
+
+Fetch embeddings
+
+    Load embeddings only for remaining CUIs.
+
+Cluster by embeddings (semantic clustering)
+
+    Agglomerative clustering using cosine distance.
+
+Select representatives per cluster
+
+    Pick CUIs based on distance within cluster (far apart = keep, close = remove).
