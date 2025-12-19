@@ -803,7 +803,12 @@ def run_cui_reduction(
 # Example usage
 if __name__ == "__main__":    
     
-    texts = ["grams"]   
+    texts = ["antidepressants depression type 2 diabetes","SSRIs depression type 2 diabetes","SNRIs depression type 2 diabetes","TCAs depression type 2 diabetes",
+"MAOIs depression type 2 diabetes","atypical antidepressants depression type 2 diabetes","Sertraline depression type 2 diabetes","Fluoxetine depression type 2 diabetes"
+"Escitalopram depression type 2 diabetes","Venlafaxine depression type 2 diabetes","Duloxetine depression type 2 diabetes",
+"Bupropion depression type 2 diabetes","Mirtazapine depression type 2 diabetes","antidepressant options type 2 diabetes depression","medication for depression and type 2 diabetes","pharmacological treatment depression type 2 diabetes","common antidepressants depression type 2 diabetes","tricyclic antidepressants depression type 2 diabetes"
+"SSRIs for depression type 2 diabetes","SNRIs for depression type 2 diabetes","Sertraline for depression type 2 diabetes","Fluoxetine for depression type 2 diabetes"
+"Bupropion for depression type 2 diabetes","Mirtazapine for depression type 2 diabetes","antidepressant choices depression diabetes type 2","pharmacotherapy depression type 2 diabetes"]   
     initial_cuis, reduced_cuis, descriptions, stats = run_cui_reduction(
         texts=texts,
         project_id=project_id,
