@@ -1,0 +1,38 @@
+import subprocess
+import networkx as nx
+import requests
+import json
+
+# Get the identity token
+tmp = subprocess.run(['gcloud', 'auth', 'print-identity-token'], stdout=subprocess.PIPE, universal_newlines=True)
+token = str(tmp.stdout).strip()
+
+
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json"
+}
+
+
+data = { "cuis": ['C5234945'],
+        "cross_context": True,
+       }
+url = url
+response = requests.post(url + "/subnet/", headers=headers, json=data)
+
+g = nx.DiGraph()
+
+nodes, edges =response.json()['output']
+g.add_nodes_from(nodes)
+g.add_edges_from(edges)
+
+
+ancestors = nx.ancestors(g, 'C5234945')
+print("Number of ancestors:",len(ancestors))
+
+descendants = nx.descendants(g, 'C5234945')
+print("Number of descendants:",len(descendants))
+
+print(f"Total nodes: {len(nodes)}")
+
+print(f"Total edges: {len(edges)}")
