@@ -9,7 +9,6 @@ from dataclasses import dataclass, asdict
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.cloud import bigquery
-from sklearn.cluster import AgglomerativeClustering
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -28,16 +27,16 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuration for CUI Reduction System"""
     # GCP Configuration
-    PROJECT_ID = os.getenv("GCP_PROJECT_ID", "my-gcp-project")
-    DATASET_ID = os.getenv("BIGQUERY_DATASET_ID", "my_dataset")
+    PROJECT_ID = os.getenv("GCP_PROJECT_ID", project_id)
+    DATASET_ID = os.getenv("BIGQUERY_DATASET_ID", dataset)
     # API Configuration
-    NER_API_URL = os.getenv("NER_API_URL", "https://api.example.com/ner")
+    NER_API_URL = os.getenv("NER_API_URL", url)
     API_TIMEOUT = int(os.getenv("API_TIMEOUT", "60"))
     API_TOP_K = int(os.getenv("API_TOP_K", "3"))
     # BigQuery Table Names
-    MRREL_TABLE = os.getenv("MRREL_TABLE", "MRREL")
-    CUI_DESCRIPTION_TABLE = os.getenv("CUI_DESCRIPTION_TABLE", "cui_descriptions")
-    CUI_NARROWER_TABLE = os.getenv("CUI_NARROWER_TABLE", "cui_narrower_concepts")
+    MRREL_TABLE = os.getenv("MRREL_TABLE", mrrel_table)
+    CUI_DESCRIPTION_TABLE = os.getenv("CUI_DESCRIPTION_TABLE", cui_desc_table)
+    CUI_NARROWER_TABLE = os.getenv("CUI_NARROWER_TABLE", descendants_table)
     # Performance tuning
     MAX_HIERARCHY_DEPTH = int(os.getenv("MAX_HIERARCHY_DEPTH", "3"))
     BQ_QUERY_TIMEOUT = int(os.getenv("BQ_QUERY_TIMEOUT", "300"))  # 5 minutes
@@ -45,9 +44,11 @@ class Config:
     # Reduction Parameters
     USE_SEMANTIC_CLUSTERING = os.getenv("USE_SEMANTIC_CLUSTERING", "True").lower() == "true"
 
+# ============================================
+# DATA CLASSES
+# ============================================
 @dataclass
 class ReductionStats:
-    """Statistics for the reduction process"""
     initial_count: int
     after_ic_rollup: int
     final_count: int
@@ -60,11 +61,11 @@ class ReductionStats:
     api_call_time: float = 0.0
 
     def to_dict(self):
-        """Convert to dictionary for JSON serialization"""
         return asdict(self)
 
+
 # ============================================
-# API Client
+# API CLIENT
 # ============================================
 class CUIAPIClient:
     """Thread-safe client for GCP-based CUI extraction API"""
@@ -78,7 +79,6 @@ class CUIAPIClient:
         self.timeout = timeout
         self.top_k = top_k
 
-        # Configure session with retry and pooling
         self.session = requests.Session()
         retry_strategy = Retry(
             total=Config.MAX_RETRIES,
@@ -89,12 +89,9 @@ class CUIAPIClient:
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
-
-        # Get initial token
         self._update_gcp_token()
 
     def _update_gcp_token(self, force: bool = False):
-        """Get GCP identity token with caching"""
         with self._token_lock:
             current_time = time.time()
             if not force and self._cached_token and current_time < self._token_expiry:
@@ -117,7 +114,7 @@ class CUIAPIClient:
                     "Authorization": f"Bearer {identity_token}",
                     "Content-Type": "application/json"
                 }
-                self._token_expiry = current_time + 3300  # 55 minutes
+                self._token_expiry = current_time + 3300
                 logger.info("GCP authentication token updated")
                 return self._cached_token
             except Exception as e:
@@ -173,8 +170,9 @@ class CUIAPIClient:
         logger.info(f"Extracted {len(all_cuis)} total unique CUIs")
         return all_cuis
 
+
 # ============================================
-# Enhanced Reducer
+# ENHANCED CUI REDUCER
 # ============================================
 class EnhancedCUIReducer:
     """Production-grade CUI reducer"""
@@ -199,12 +197,37 @@ class EnhancedCUIReducer:
         self.cui_narrower_table = cui_narrower_table
         self.max_hierarchy_depth = max_hierarchy_depth
 
-        # Caches
         self._hierarchy_cache = None
         self._ic_scores_cache = None
         self._description_cache = {}
         logger.info("EnhancedCUIReducer initialized")
 
+    # ---------------- Filter allowed CUIs ----------------
+    def filter_allowed_cuis(self, cuis: Set[str]) -> List[str]:
+        """Filter CUIs to ICD, SNOMED, or LOINC using stored project and dataset"""
+        if not cuis:
+            return []
+        try:
+            client = bigquery.Client(project=self.project_id)
+            query = f"""
+            SELECT DISTINCT CUI
+            FROM `{self.project_id}.{self.dataset_id}.MRCONSO`
+            WHERE CUI IN UNNEST(@cuis)
+              AND SAB IN ('ICD10', 'ICD9', 'SNOMEDCT_US', 'LOINC')
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", list(cuis))]
+            )
+            query_job = client.query(query, job_config=job_config)
+            df = query_job.result(timeout=60).to_dataframe()
+            allowed_cuis = df['CUI'].tolist()
+            logger.info(f"{len(allowed_cuis)} CUIs allowed after SAB filtering")
+            return allowed_cuis
+        except Exception as e:
+            logger.error(f"Failed to filter CUIs by SAB: {str(e)}")
+            return []
+
+    # ---------------- Reduction pipeline ----------------
     def reduce(
         self,
         input_cuis: List[str],
@@ -216,7 +239,6 @@ class EnhancedCUIReducer:
             logger.warning("Empty input CUI list")
             return [], self._create_empty_stats(start_time)
 
-        # Clean input
         input_cuis = list(set(str(c).strip() for c in input_cuis if c and str(c).strip()))
         initial_count = len(input_cuis)
         logger.info(f"Starting reduction: {initial_count} CUIs")
@@ -224,18 +246,15 @@ class EnhancedCUIReducer:
         try:
             hierarchy = self._build_hierarchy_safe(input_cuis)
             ic_scores = self._compute_ic_scores_safe(hierarchy)
-            # Median-based IC threshold
             ic_values = list(ic_scores.values())
             ic_threshold = float(np.median(ic_values)) if ic_values else 5.0
             logger.info(f"Using median-based IC threshold: {ic_threshold:.3f}")
 
-            # Stage 1: IC-based rollup
             rolled_up_cuis = self._semantic_rollup_with_ic_safe(input_cuis, hierarchy, ic_scores, ic_threshold)
             after_rollup = len(rolled_up_cuis)
             rollup_reduction = self._safe_percentage(initial_count - after_rollup, initial_count)
             logger.info(f"Stage 1 complete: {after_rollup} CUIs ({rollup_reduction:.1f}% reduction)")
 
-            # Stage 2: Semantic clustering (optional)
             if use_semantic_clustering:
                 final_cuis = self._semantic_clustering_safe(rolled_up_cuis, ic_scores)
             else:
@@ -243,7 +262,6 @@ class EnhancedCUIReducer:
             final_count = len(final_cuis)
             clustering_reduction = self._safe_percentage(after_rollup - final_count, initial_count)
 
-            # Stats
             total_reduction = self._safe_percentage(initial_count - final_count, initial_count)
             processing_time = time.time() - start_time
             stats = ReductionStats(
@@ -284,9 +302,12 @@ class EnhancedCUIReducer:
                   AND rel IN ('PAR', 'CHD')
                 """
                 job_config = bigquery.QueryJobConfig(
-                    query_parameters=[bigquery.ArrayQueryParameter("frontier", "STRING", list(frontier))],
-                    timeout_ms=Config.BQ_QUERY_TIMEOUT * 1000)
-                df = self.client.query(query, job_config=job_config).result(timeout=Config.BQ_QUERY_TIMEOUT).to_dataframe()
+                    query_parameters=[
+                        bigquery.ArrayQueryParameter("frontier", "STRING", list(frontier))
+                    ]
+                )
+                query_job = self.client.query(query, job_config=job_config)
+                df = query_job.result(timeout=Config.BQ_QUERY_TIMEOUT).to_dataframe()
                 if df.empty:
                     break
                 next_frontier = set()
@@ -327,9 +348,10 @@ class EnhancedCUIReducer:
         WHERE LENGTH(TRIM(child_cui)) > 0
         """
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", relevant_cuis[:1000])],
-            timeout_ms=30000)
-        df = self.client.query(query, job_config=job_config).result(timeout=30).to_dataframe()
+            query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", relevant_cuis[:1000])]
+        )
+        # Timeout reduced to 10 seconds
+        df = self.client.query(query, job_config=job_config, timeout=10).result().to_dataframe()
         for _, row in df.iterrows():
             parent, child = str(row['parent_cui']), str(row['child_cui'])
             if parent and child:
@@ -394,103 +416,103 @@ class EnhancedCUIReducer:
             return cui_list
 
     def _semantic_clustering_safe(self, cui_list, ic_scores):
-    """
-    Graph-based clustering with medoid selection.
-    Distance = symmetric difference of ancestor sets.
-    """
-    if len(cui_list) <= 1:
-        return cui_list
+        """
+        Graph-based clustering with medoid selection.
+        Distance = symmetric difference of ancestor sets.
+        """
+        if len(cui_list) <= 1:
+            return cui_list
 
-    try:
-        hierarchy = self._hierarchy_cache or {}
-        child_to_parents = hierarchy.get('child_to_parents', {})
+        try:
+            hierarchy = self._hierarchy_cache or {}
+            child_to_parents = hierarchy.get('child_to_parents', {})
 
-        # -------- Step 1: Build ancestor sets (depth-limited) --------
-        ancestor_cache: Dict[str, Set[str]] = {}
+            # -------- Step 1: Build ancestor sets (depth-limited) --------
+            ancestor_cache: Dict[str, Set[str]] = {}
 
-        def get_ancestors(cui: str, max_depth: int = 3) -> Set[str]:
-            if cui in ancestor_cache:
-                return ancestor_cache[cui]
+            def get_ancestors(cui: str, max_depth: int = 3) -> Set[str]:
+                if cui in ancestor_cache:
+                    return ancestor_cache[cui]
 
-            ancestors = set()
-            visited = set()
-            queue = deque([(cui, 0)])
+                ancestors = set()
+                visited = set()
+                queue = deque([(cui, 0)])
 
-            while queue:
-                current, depth = queue.popleft()
-                if depth >= max_depth:
+                while queue:
+                    current, depth = queue.popleft()
+                    if depth >= max_depth:
+                        continue
+                    for parent in child_to_parents.get(current, []):
+                        if parent not in visited:
+                            visited.add(parent)
+                            ancestors.add(parent)
+                            queue.append((parent, depth + 1))
+
+                ancestor_cache[cui] = ancestors
+                return ancestors
+
+            for cui in cui_list:
+                get_ancestors(cui)
+
+            # -------- Step 2: Form clusters (shared ancestors) --------
+            unvisited = set(cui_list)
+            clusters = []
+
+            while unvisited:
+                seed = unvisited.pop()
+                seed_anc = ancestor_cache.get(seed, set())
+                cluster = {seed}
+
+                for other in list(unvisited):
+                    other_anc = ancestor_cache.get(other, set())
+                    if seed_anc.intersection(other_anc):
+                        cluster.add(other)
+                        unvisited.remove(other)
+
+                clusters.append(cluster)
+
+            logger.info(f"Formed {len(clusters)} semantic clusters")
+
+            # -------- Step 3: Graph distance --------
+            def graph_distance(c1: str, c2: str) -> int:
+                return len(ancestor_cache[c1] ^ ancestor_cache[c2])
+
+            # -------- Step 4: Medoid selection --------
+            final_cuis = []
+
+            for cluster in clusters:
+                if len(cluster) == 1:
+                    final_cuis.append(next(iter(cluster)))
                     continue
-                for parent in child_to_parents.get(current, []):
-                    if parent not in visited:
-                        visited.add(parent)
-                        ancestors.add(parent)
-                        queue.append((parent, depth + 1))
 
-            ancestor_cache[cui] = ancestors
-            return ancestors
+                distance_sums = {}
+                for c in cluster:
+                    dist_sum = 0
+                    for other in cluster:
+                        if c != other:
+                            dist_sum += graph_distance(c, other)
+                    distance_sums[c] = dist_sum
 
-        for cui in cui_list:
-            get_ancestors(cui)
+                # Medoid = minimum total distance
+                min_dist = min(distance_sums.values())
+                medoid_candidates = [
+                    c for c, d in distance_sums.items() if d == min_dist
+                ]
 
-        # -------- Step 2: Form clusters (shared ancestors) --------
-        unvisited = set(cui_list)
-        clusters = []
+                # Tie-breaker: highest IC
+                medoid = max(medoid_candidates, key=lambda x: ic_scores.get(x, 0.0))
+                final_cuis.append(medoid)
 
-        while unvisited:
-            seed = unvisited.pop()
-            seed_anc = ancestor_cache.get(seed, set())
-            cluster = {seed}
+                logger.debug(
+                    f"Cluster {cluster} → Medoid {medoid} "
+                    f"(distance={min_dist}, IC={ic_scores.get(medoid, 0.0):.2f})"
+                )
 
-            for other in list(unvisited):
-                other_anc = ancestor_cache.get(other, set())
-                if seed_anc.intersection(other_anc):
-                    cluster.add(other)
-                    unvisited.remove(other)
+            return list(set(final_cuis))
 
-            clusters.append(cluster)
-
-        logger.info(f"Formed {len(clusters)} semantic clusters")
-
-        # -------- Step 3: Graph distance --------
-        def graph_distance(c1: str, c2: str) -> int:
-            return len(ancestor_cache[c1] ^ ancestor_cache[c2])
-
-        # -------- Step 4: Medoid selection --------
-        final_cuis = []
-
-        for cluster in clusters:
-            if len(cluster) == 1:
-                final_cuis.append(next(iter(cluster)))
-                continue
-
-            distance_sums = {}
-            for c in cluster:
-                dist_sum = 0
-                for other in cluster:
-                    if c != other:
-                        dist_sum += graph_distance(c, other)
-                distance_sums[c] = dist_sum
-
-            # Medoid = minimum total distance
-            min_dist = min(distance_sums.values())
-            medoid_candidates = [
-                c for c, d in distance_sums.items() if d == min_dist
-            ]
-
-            # Tie-breaker: highest IC
-            medoid = max(medoid_candidates, key=lambda x: ic_scores.get(x, 0.0))
-            final_cuis.append(medoid)
-
-            logger.debug(
-                f"Cluster {cluster} → Medoid {medoid} "
-                f"(distance={min_dist}, IC={ic_scores.get(medoid, 0.0):.2f})"
-            )
-
-        return list(set(final_cuis))
-
-    except Exception as e:
-        logger.error(f"Graph-medoid clustering failed: {str(e)}")
-        return cui_list
+        except Exception as e:
+            logger.error(f"Graph-medoid clustering failed: {str(e)}")
+            return cui_list
            
     def get_cui_descriptions(self, cui_list: List[str]) -> Dict[str, str]:
         """Retrieve descriptions with caching"""
@@ -557,6 +579,9 @@ class EnhancedCUIReducer:
         )
 
 
+# ============================================
+# PIPELINE
+# ============================================
 class CUIReductionPipeline:
     """End-to-end pipeline with comprehensive error handling"""
 
@@ -571,17 +596,12 @@ class CUIReductionPipeline:
         batch_size: int = 50,
         max_workers: int = 5
     ) -> Tuple[List[str], Dict[str, str], Optional[ReductionStats]]:
-        """
-        Complete pipeline with guaranteed non-error return
-        Always returns valid data, even on partial failures
-        """
         if not texts:
             logger.warning("Empty text list provided")
             return [], {}, None
 
         start_time = time.time()
         try:
-            # Extract CUIs
             logger.info(f"Extracting CUIs from {len(texts)} texts...")
             if len(texts) > batch_size:
                 initial_cuis = self.api_client.extract_cuis_parallel(
@@ -594,17 +614,19 @@ class CUIReductionPipeline:
                 logger.warning("No CUIs extracted from texts")
                 return [], {}, None
 
-            # Reduce CUIs
+            logger.info(f"Filtering {len(initial_cuis)} CUIs to retain only ICD, SNOMED, and LOINC...")
+            initial_cuis = self.cui_reducer.filter_allowed_cuis(initial_cuis)
+
+            if not initial_cuis:
+                logger.warning("No CUIs remain after filtering")
+                return [], {}, None
+
             reduced_cuis, stats = self.cui_reducer.reduce(
                 list(initial_cuis),
                 use_semantic_clustering=use_semantic_clustering
             )
 
-            # Add API call time to stats
             stats.api_call_time = time.time() - start_time - stats.processing_time
-
-            # Get descriptions
-            logger.info("Fetching descriptions...")
             descriptions = self.cui_reducer.get_cui_descriptions(reduced_cuis)
 
             return reduced_cuis, descriptions, stats
@@ -614,10 +636,11 @@ class CUIReductionPipeline:
             return [], {}, None
 
 
+# ============================================
+# MAIN
+# ============================================
 def main():
-    """Example usage with comprehensive error handling"""
     try:
-        # Initialize
         logger.info("Initializing CUI Reduction System...")
         api_client = CUIAPIClient(
             api_base_url=Config.NER_API_URL,
@@ -636,35 +659,28 @@ def main():
 
         pipeline = CUIReductionPipeline(api_client, cui_reducer)
 
-        # Example texts
-        texts = ["History of Type 2 Diabetes Mellitus and hypertension."]
+        texts = ["grams"]
 
-        # Process
-        logger.info("Processing texts...")
         reduced_cuis, descriptions, stats = pipeline.process_texts(
             texts,
             use_semantic_clustering=Config.USE_SEMANTIC_CLUSTERING
         )
 
-        # Display results
         print("\n" + "=" * 80)
         print("ENHANCED CUI REDUCTION RESULTS")
         print("=" * 80)
 
         if stats is None:
-            print("\n No CUIs were extracted. Check:")
-            print("  • API endpoint configuration")
-            print("  • Authentication token")
-            print("  • Input text contains medical concepts")
+            print("\nNo CUIs were extracted. Check API endpoint, authentication, or input text.")
         else:
-            print(f"\n Initial CUIs: {stats.initial_count}")
-            print(f" After IC Rollup: {stats.after_ic_rollup} ({stats.ic_rollup_reduction_pct:.1f}%)")
-            print(f" Final CUIs: {stats.final_count} ({stats.total_reduction_pct:.1f}% total)")
-            print(f" IC Threshold: {stats.ic_threshold_used:.3f}")
-            print(f" Hierarchy Size: {stats.hierarchy_size} CUIs")
-            print(f" API Time: {stats.api_call_time:.2f}s")
-            print(f" Reduction Time: {stats.processing_time:.2f}s")
-            print(f" Total Time: {stats.api_call_time + stats.processing_time:.2f}s")
+            print(f"\nInitial CUIs: {stats.initial_count}")
+            print(f"After IC Rollup: {stats.after_ic_rollup} ({stats.ic_rollup_reduction_pct:.1f}%)")
+            print(f"Final CUIs: {stats.final_count} ({stats.total_reduction_pct:.1f}% total)")
+            print(f"IC Threshold: {stats.ic_threshold_used:.3f}")
+            print(f"Hierarchy Size: {stats.hierarchy_size} CUIs")
+            print(f"API Time: {stats.api_call_time:.2f}s")
+            print(f"Reduction Time: {stats.processing_time:.2f}s")
+            print(f"Total Time: {stats.api_call_time + stats.processing_time:.2f}s")
 
             if reduced_cuis:
                 print("\n" + "=" * 80)
@@ -678,7 +694,6 @@ def main():
                 if len(reduced_cuis) > 10:
                     print(f"\n... and {len(reduced_cuis) - 10} more CUIs")
 
-            # Export stats as JSON
             print("\n" + "=" * 80)
             print("Stats JSON:")
             print(json.dumps(stats.to_dict(), indent=2))
@@ -688,5 +703,6 @@ def main():
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}", exc_info=True)
         raise
+
 if __name__ == "__main__":
     main()
