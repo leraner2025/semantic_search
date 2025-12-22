@@ -516,7 +516,7 @@ class EnhancedCUIReducer:
             upper_tri = sim_matrix[np.triu_indices_from(sim_matrix, k=1)]
             perc95 = np.percentile(upper_tri, 95)
     
-            logger.info(f"Dynamic similarity threshold (95th percentile): {perc95:.4f}")
+            logger.info(f"Dynamic similarity threshold : {perc95:.4f}")
     
             # ---- STEP 2: COARSE CLUSTERING ----
             clustering = AgglomerativeClustering(
