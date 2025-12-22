@@ -502,93 +502,93 @@ class EnhancedCUIReducer:
     similarity_threshold: float = None,  # no longer required, kept for compatibility
     min_intra_cluster_distance: float = 0.25
 ) -> List[str]:
-    """
-    Clusters CUIs, then prunes CLOSE CUIs within each cluster
-    while KEEPING far-apart CUIs.
-    Threshold is dynamically set to the 95th percentile of pairwise similarities.
-    """
-
-    if len(cui_list) <= 1:
-        return cui_list
-
-    try:
-        logger.info(f"Fetching embeddings for {len(cui_list)} CUIs...")
-
-        query = f"""
-        SELECT REF_CUI as cui, REF_Embedding as embedding
-        FROM `{self.project_id}.{self.dataset_id}.{self.cui_embeddings_table}`
-        WHERE REF_CUI IN UNNEST(@cuis)
         """
-
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("cuis", "STRING", cui_list)
-            ]
-        )
-
-        df = self.client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
-
-        if df.empty:
-            logger.warning("No embeddings found, skipping clustering")
+        Clusters CUIs, then prunes CLOSE CUIs within each cluster
+        while KEEPING far-apart CUIs.
+        Threshold is dynamically set to the 95th percentile of pairwise similarities.
+        """
+    
+        if len(cui_list) <= 1:
             return cui_list
-
-        embeddings = np.vstack(df['embedding'].values)
-        cuis = np.array(df['cui'].values)
-
-        # ---- STEP 1: COMPUTE 95th PERCENTILE THRESHOLD ----
-        sim_matrix = 1 - cosine_distances(embeddings)  # similarity = 1 - distance
-        upper_tri = sim_matrix[np.triu_indices_from(sim_matrix, k=1)]
-        perc95 = np.percentile(upper_tri, 95)
-
-        logger.info(f"Dynamic similarity threshold (95th percentile): {perc95:.4f}")
-
-        # ---- STEP 2: COARSE CLUSTERING ----
-        clustering = AgglomerativeClustering(
-            n_clusters=None,
-            distance_threshold=1 - perc95,  # use percentile-based threshold
-            metric='cosine',
-            linkage='average'
-        )
-
-        labels = clustering.fit_predict(embeddings)
-
-        # ---- STEP 3: INTRA-CLUSTER DISTANCE FILTERING ----
-        final_cuis = []
-
-        for cluster_id in np.unique(labels):
-            idx = np.where(labels == cluster_id)[0]
-            cluster_cuis = cuis[idx]
-            cluster_embeddings = embeddings[idx]
-
-            if len(cluster_cuis) == 1:
-                final_cuis.append(cluster_cuis[0])
-                continue
-
-            dist_matrix = cosine_distances(cluster_embeddings)
-
-            order = sorted(
-                range(len(cluster_cuis)),
-                key=lambda i: ic_scores.get(cluster_cuis[i], 0),
-                reverse=True
+    
+        try:
+            logger.info(f"Fetching embeddings for {len(cui_list)} CUIs...")
+    
+            query = f"""
+            SELECT REF_CUI as cui, REF_Embedding as embedding
+            FROM `{self.project_id}.{self.dataset_id}.{self.cui_embeddings_table}`
+            WHERE REF_CUI IN UNNEST(@cuis)
+            """
+    
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("cuis", "STRING", cui_list)
+                ]
             )
-
-            kept = []
-            for i in order:
-                too_close = any(dist_matrix[i, j] < min_intra_cluster_distance for j in kept)
-                if not too_close:
-                    kept.append(i)
-
-            final_cuis.extend(cluster_cuis[kept])
-
-        logger.info(
-            f"Distance-based clustering reduced {len(cui_list)} → {len(final_cuis)} CUIs"
-        )
-
-        return list(set(final_cuis))
-
-    except Exception as e:
-        logger.error(f"Clustering failed: {str(e)}")
-        return cui_list
+    
+            df = self.client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
+    
+            if df.empty:
+                logger.warning("No embeddings found, skipping clustering")
+                return cui_list
+    
+            embeddings = np.vstack(df['embedding'].values)
+            cuis = np.array(df['cui'].values)
+    
+            # ---- STEP 1: COMPUTE 95th PERCENTILE THRESHOLD ----
+            sim_matrix = 1 - cosine_distances(embeddings)  # similarity = 1 - distance
+            upper_tri = sim_matrix[np.triu_indices_from(sim_matrix, k=1)]
+            perc95 = np.percentile(upper_tri, 95)
+    
+            logger.info(f"Dynamic similarity threshold (95th percentile): {perc95:.4f}")
+    
+            # ---- STEP 2: COARSE CLUSTERING ----
+            clustering = AgglomerativeClustering(
+                n_clusters=None,
+                distance_threshold=1 - perc95,  # use percentile-based threshold
+                metric='cosine',
+                linkage='average'
+            )
+    
+            labels = clustering.fit_predict(embeddings)
+    
+            # ---- STEP 3: INTRA-CLUSTER DISTANCE FILTERING ----
+            final_cuis = []
+    
+            for cluster_id in np.unique(labels):
+                idx = np.where(labels == cluster_id)[0]
+                cluster_cuis = cuis[idx]
+                cluster_embeddings = embeddings[idx]
+    
+                if len(cluster_cuis) == 1:
+                    final_cuis.append(cluster_cuis[0])
+                    continue
+    
+                dist_matrix = cosine_distances(cluster_embeddings)
+    
+                order = sorted(
+                    range(len(cluster_cuis)),
+                    key=lambda i: ic_scores.get(cluster_cuis[i], 0),
+                    reverse=True
+                )
+    
+                kept = []
+                for i in order:
+                    too_close = any(dist_matrix[i, j] < min_intra_cluster_distance for j in kept)
+                    if not too_close:
+                        kept.append(i)
+    
+                final_cuis.extend(cluster_cuis[kept])
+    
+            logger.info(
+                f"Distance-based clustering reduced {len(cui_list)} → {len(final_cuis)} CUIs"
+            )
+    
+            return list(set(final_cuis))
+    
+        except Exception as e:
+            logger.error(f"Clustering failed: {str(e)}")
+            return cui_list
 
 
     
