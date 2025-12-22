@@ -1,32 +1,18 @@
-import logging
-import time
-import threading
-import subprocess
-import requests
-import numpy as np
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Set, Tuple, Optional
-from collections import defaultdict, deque
 
-from google.cloud import bigquery
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from sklearn.cluster import AgglomerativeClustering
-from sklearn.metrics.pairwise import cosine_distances
-
-# ----------------------------
 # Configure logging
-# ----------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # ----------------------------
-# Filter function
+# filter function
 # ----------------------------
 def filter_allowed_cuis(cuis: Set[str], project_id: str, dataset_id: str) -> List[str]:
+    """
+    only ICD, LOINC, or SNOMED based on MRCONSO table.
+    """
     if not cuis:
         return []
 
@@ -36,31 +22,24 @@ def filter_allowed_cuis(cuis: Set[str], project_id: str, dataset_id: str) -> Lis
         SELECT DISTINCT CUI
         FROM `{project_id}.{dataset_id}.MRCONSO`
         WHERE CUI IN UNNEST(@cuis)
-          AND SAB IN (
-            'CCSR_ICD10CM','CCSR_ICD10PCS','DMDICD10','ICD10','ICD10AE',
-            'ICD10AM','ICD10AMAE','ICD10CM','ICD10DUT','ICD10PCS',
-            'ICD9CM','ICPC2ICD10DUT','ICPC2ICD10ENG',
-            'SNOMEDCT_US','LOINC'
-          )
+          AND SAB IN ('CCSR_ICD10CM','CCSR_ICD10PCS','DMDICD10','ICD10','ICD10AE','ICD10AM','ICD10AMAE','ICD10CM','ICD10DUT','ICD10PCS','ICD9CM','ICPC2ICD10DUT',
+          'ICPC2ICD10ENG','SNOMEDCT_US', 'LOINC')
         """
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("cuis", "STRING", list(cuis))
-            ]
+            query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", list(cuis))]
         )
-        df = client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
-        allowed = df["CUI"].tolist()
-        logger.info(f"{len(allowed)} CUIs after SAB filtering")
-        return allowed
+        query_job = client.query(query, job_config=job_config)
+        df = query_job.result(timeout=60).to_dataframe()
+        allowed_cuis = df['CUI'].tolist()
+        logger.info(f"{len(allowed_cuis)} CUIs after filter")
+        return allowed_cuis
     except Exception as e:
         logger.error(f"Failed to filter CUIs by SAB: {str(e)}")
         return []
 
-# ----------------------------
-# Reduction statistics
-# ----------------------------
 @dataclass
 class ReductionStats:
+    
     initial_count: int
     after_ic_rollup: int
     final_count: int
@@ -71,24 +50,24 @@ class ReductionStats:
     ic_threshold_used: float
     hierarchy_size: int = 0
     api_call_time: float = 0.0
-
+    
     def to_dict(self):
         return asdict(self)
 
-# ----------------------------
-# API Client
-# ----------------------------
-class CUIAPIClient:
+
+class CUIAPIClient:   
+    
     _token_lock = threading.Lock()
     _cached_token = None
     _token_expiry = 0
-
+    
     def __init__(self, api_base_url: str, timeout: int = 60, top_k: int = 3, max_retries: int = 3):
-        self.api_base_url = api_base_url.rstrip("/")
+        self.api_base_url = api_base_url.rstrip('/')
         self.timeout = timeout
         self.top_k = top_k
         self.max_retries = max_retries
-
+        
+        # Configure session with connection pooling
         self.session = requests.Session()
         retry_strategy = Retry(
             total=max_retries,
@@ -103,71 +82,86 @@ class CUIAPIClient:
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
-
+        
+        # Get initial token
         self._update_gcp_token()
-
+    
     def _update_gcp_token(self, force: bool = False):
+        
         with self._token_lock:
-            now = time.time()
-            if not force and self._cached_token and now < self._token_expiry:
+            current_time = time.time()
+            
+            if not force and self._cached_token and current_time < self._token_expiry:
                 return self._cached_token
-
-            result = subprocess.run(
-                ["gcloud", "auth", "print-identity-token"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr)
-
-            token = result.stdout.strip()
-            self._cached_token = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-            self._token_expiry = now + 3300
-            return self._cached_token
-
-    def extract_cuis_batch(self, texts: List[str], retry_auth: bool = True) -> Set[str]:
+            
+            try:
+                result = subprocess.run(
+                    ['gcloud', 'auth', 'print-identity-token'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    timeout=10,
+                    check=False
+                )
+                
+                if result.returncode != 0:
+                    raise Exception(f"gcloud auth failed: {result.stderr}")
+                
+                identity_token = result.stdout.strip()
+                if not identity_token:
+                    raise Exception("Empty token received from gcloud")
+                
+                self._cached_token = {
+                    "Authorization": f"Bearer {identity_token}",
+                    "Content-Type": "application/json"
+                }
+                self._token_expiry = current_time + 3300  # 55 minutes
+                
+                # logger.info("GCP authentication token updated")
+                return self._cached_token
+                
+            except Exception as e:
+                raise Exception(f"Failed to get GCP token: {str(e)}")
+    
+    def extract_cuis_batch(self, texts: List[str], retry_auth: bool = True) -> Set[str]:        
         if not texts:
             return set()
-
+        
         payload = {"query_texts": texts, "top_k": self.top_k}
         headers = self._update_gcp_token()
-
+        
         try:
-            resp = self.session.post(
+            response = self.session.post(
                 self.api_base_url,
                 json=payload,
                 headers=headers,
                 timeout=self.timeout
             )
-
-            if resp.status_code == 401 and retry_auth:
+            
+            if response.status_code == 401 and retry_auth:
+                logger.warning("Token expired, refreshing...")
                 self._update_gcp_token(force=True)
                 return self.extract_cuis_batch(texts, retry_auth=False)
-
-            resp.raise_for_status()
-            data = resp.json()
-
-            cuis = set()
-            for t in texts:
-                for c in data.get(t, []):
-                    if c:
-                        cuis.add(str(c))
-            return cuis
-
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            all_cuis = set()
+            for text in texts:
+                cuis = data.get(text, [])
+                if isinstance(cuis, list):
+                    all_cuis.update(str(c) for c in cuis if c)
+            
+            logger.info(f"Extracted {len(all_cuis)} unique CUIs from {len(texts)} texts")
+            return all_cuis
+            
         except Exception as e:
             logger.error(f"API call failed: {str(e)}")
-            return set()
+            return {"error": "api_failed", "details": str(e)}
+    
 
-# ----------------------------
-# Enhanced CUI Reducer
-# ----------------------------
-class EnhancedCUIReducer:
-
+class EnhancedCUIReducer:    
+    
     def __init__(
         self,
         project_id: str,
@@ -179,7 +173,12 @@ class EnhancedCUIReducer:
         max_hierarchy_depth: int = 1,
         query_timeout: int = 300
     ):
-        self.client = bigquery.Client(project=project_id)
+
+        try:
+            self.client = bigquery.Client(project=project_id)
+        except Exception as e:
+            raise Exception(f"Failed to initialize BigQuery client: {str(e)}")
+        
         self.project_id = project_id
         self.dataset_id = dataset_id
         self.mrrel_table = mrrel_table
@@ -188,14 +187,39 @@ class EnhancedCUIReducer:
         self.cui_narrower_table = cui_narrower_table
         self.max_hierarchy_depth = max_hierarchy_depth
         self.query_timeout = query_timeout
-
+        self.MRCONSO=MRCONSO
+        
+        # Cache
         self._hierarchy_cache = None
         self._ic_scores_cache = None
         self._description_cache = {}
+        
+        # logger.info(f"Initialized CUIReducer for ") 
+        
+    def filter_allowed_cuis(cuis: Set[str], project_id: str, dataset_id: str) -> List[str]:       
+        if not cuis:
+            return []
 
-    # ----------------------------
-    # Reduction
-    # ----------------------------
+        try:
+            client = bigquery.Client(project=project_id)
+            query = f"""
+            SELECT DISTINCT CUI
+            FROM `{project_id}.{dataset_id}.MRCONSO`
+            WHERE CUI IN UNNEST(@cuis)
+              AND SAB IN ('ICD10', 'ICD9', 'SNOMEDCT_US', 'LOINC')
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", list(cuis))]
+            )
+            query_job = client.query(query, job_config=job_config)
+            df = query_job.result(timeout=60).to_dataframe()
+            allowed_cuis = df['CUI'].tolist()
+            logger.info(f"{len(allowed_cuis)} CUIs allowed after SAB filtering")
+            return allowed_cuis
+        except Exception as e:
+            logger.error(f"Failed to filter CUIs by SAB: {str(e)}")
+            return []
+    
     def reduce(
         self,
         input_cuis: List[str],
@@ -249,102 +273,178 @@ class EnhancedCUIReducer:
         )
 
         return final_cuis, stats
-
-    # ----------------------------
-    # Hierarchy
-    # ----------------------------
+    
     def _build_hierarchy_safe(self, relevant_cuis: List[str]) -> Dict:
         if self._hierarchy_cache is not None:
             return self._hierarchy_cache
-
+        
         child_to_parents = defaultdict(list)
         parent_to_children = defaultdict(list)
         all_cuis = set(relevant_cuis)
-
-        visited = set()
-        frontier = set(relevant_cuis)
-
-        for depth in range(self.max_hierarchy_depth):
-            if not frontier:
-                break
-
-            query = f"""
-            SELECT DISTINCT cui1, cui2, rel
-            FROM `{self.project_id}.{self.dataset_id}.{self.mrrel_table}`
-            WHERE (cui1 IN UNNEST(@frontier) OR cui2 IN UNNEST(@frontier))
-              AND rel IN ('PAR','CHD')
-            """
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ArrayQueryParameter("frontier", "STRING", list(frontier))
-                ]
-            )
-
-            df = self.client.query(query, job_config=job_config).result(
-                timeout=self.query_timeout
-            ).to_dataframe()
-
-            next_frontier = set()
-            for _, row in df.iterrows():
-                c1, c2, rel = row["cui1"], row["cui2"], row["rel"]
-                if rel == "PAR":
-                    parent_to_children[c1].append(c2)
-                    child_to_parents[c2].append(c1)
-                else:
-                    parent_to_children[c2].append(c1)
-                    child_to_parents[c1].append(c2)
-
-                all_cuis.update([c1, c2])
-                if c1 not in visited:
-                    next_frontier.add(c1)
-                if c2 not in visited:
-                    next_frontier.add(c2)
-
-            visited.update(frontier)
-            frontier = next_frontier - visited
-
-        self._hierarchy_cache = {
-            "child_to_parents": dict(child_to_parents),
-            "parent_to_children": dict(parent_to_children),
-            "all_cuis": all_cuis
+        
+        try:
+            visited = set()
+            frontier = set(relevant_cuis)
+            
+            for depth in range(self.max_hierarchy_depth):
+                if not frontier:
+                    break
+                
+                logger.info(f"Fetching hierarchy depth {depth + 1}: {len(frontier)} CUIs")
+                
+                query = f"""
+                SELECT DISTINCT cui1, cui2, rel
+                FROM `{self.project_id}.{self.dataset_id}.{self.mrrel_table}`
+                WHERE (cui1 IN UNNEST(@frontier) OR cui2 IN UNNEST(@frontier))
+                  AND rel IN ('PAR','CHD') 
+                 """
+                # LIMIT 100000
+                 # """
+                #restrciting to only PAR
+               
+                
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ArrayQueryParameter("frontier", "STRING", list(frontier))
+                    ]
+                )
+                
+                try:
+                    query_job = self.client.query(query, job_config=job_config)
+                    # FIXED: Use timeout in result() method, not in job_config
+                    df = query_job.result(timeout=self.query_timeout).to_dataframe()
+                    
+                    if len(df) == 0:
+                        logger.warning(f"No relationships found at depth {depth + 1}")
+                        break
+                    
+                    logger.info(f"Retrieved {len(df)} relationships")
+                    
+                    next_frontier = set()
+                    for _, row in df.iterrows():
+                        cui1, cui2, rel = str(row['cui1']), str(row['cui2']), str(row['rel'])
+                        
+                        if rel == 'PAR':
+                            parent_to_children[cui1].append(cui2)
+                            child_to_parents[cui2].append(cui1)
+                        elif rel == 'CHD':
+                            parent_to_children[cui2].append(cui1)
+                            child_to_parents[cui1].append(cui2)
+                        
+                        all_cuis.update([cui1, cui2])
+                        
+                        if cui1 not in visited:
+                            next_frontier.add(cui1)
+                        if cui2 not in visited:
+                            next_frontier.add(cui2)
+                    
+                    visited.update(frontier)
+                    frontier = next_frontier - visited
+                    
+                except Exception as e:
+                    logger.warning(f"MRREL query failed at depth {depth + 1}: {str(e)}")
+                    break
+            
+        except Exception as e:
+            logger.error(f"Failed to build hierarchy: {str(e)}")
+        
+        hierarchy = {
+            'child_to_parents': dict(child_to_parents),
+            'parent_to_children': dict(parent_to_children),
+            'all_cuis': all_cuis
         }
-        return self._hierarchy_cache
-
-    # ----------------------------
-    # IC computation
-    # ----------------------------
+        
+        self._hierarchy_cache = hierarchy
+        logger.info(f"Built hierarchy: {len(all_cuis)} CUIs total")
+        
+        return hierarchy
+    
     def _compute_ic_scores_safe(self, hierarchy: Dict) -> Dict[str, float]:
         if self._ic_scores_cache is not None:
             return self._ic_scores_cache
-
-        parent_to_children = hierarchy.get("parent_to_children", {})
-        all_cuis = hierarchy.get("all_cuis", set())
+        
+        parent_to_children = hierarchy.get('parent_to_children', {})
+        all_cuis = hierarchy.get('all_cuis', set())
         total = len(all_cuis)
-
-        descendant_counts = {}
-
-        def count_desc(cui, visited=None):
-            if visited is None:
-                visited = set()
-            if cui in visited:
-                return 0
-            visited.add(cui)
-            count = 0
-            for ch in parent_to_children.get(cui, []):
-                count += 1 + count_desc(ch, visited)
-            return count
-
-        ic_scores = {}
-        for cui in all_cuis:
-            dc = count_desc(cui)
-            ic_scores[cui] = max(0.0, -np.log((dc + 1) / total))
-
-        self._ic_scores_cache = ic_scores
-        return ic_scores
-
-    # ----------------------------
-    # Rollup
-    # ----------------------------
+        
+        if total == 0:
+            return {}
+        
+        try:
+            descendant_counts = {}
+            
+            def count_descendants(cui: str, visited: Set[str] = None) -> int:
+                if visited is None:
+                    visited = set()
+                if cui in visited or cui in descendant_counts:
+                    return descendant_counts.get(cui, 0)
+                
+                visited.add(cui)
+                children = parent_to_children.get(cui, [])
+                count = len(children)
+                
+                for child in children:
+                    count += count_descendants(child, visited)
+                
+                descendant_counts[cui] = count
+                return count
+            
+            logger.info("Computing IC scores...")
+            for cui in all_cuis:
+                if cui not in descendant_counts:
+                    try:
+                        count_descendants(cui)
+                    except RecursionError:
+                        logger.warning(f"Recursion limit for {cui}")
+                        descendant_counts[cui] = 0
+            
+            # Compute IC
+            ic_scores = {}
+            for cui in all_cuis:
+                desc_count = descendant_counts.get(cui, 0)
+                ic = -np.log((desc_count + 1) / total)
+                ic_scores[cui] = max(0.0, ic)
+            
+            self._ic_scores_cache = ic_scores
+            
+            if ic_scores:
+                values = list(ic_scores.values())
+                logger.info(f"IC scores: {len(ic_scores)} CUIs, range [{min(values):.2f}, {max(values):.2f}]")
+            
+            return ic_scores
+            
+        except Exception as e:
+            logger.error(f"Failed to compute IC scores: {str(e)}")
+            return {cui: 5.0 for cui in all_cuis}
+    
+    def _determine_threshold(
+        self, 
+        ic_scores: Dict, 
+        ic_threshold: Optional[float],
+        ic_percentile: float,
+        adaptive: bool,
+        input_cuis: List[str],
+        hierarchy: Dict,
+        target_reduction: float
+    ) -> float:
+        try:
+            if ic_threshold is not None:
+                return float(ic_threshold)
+            
+            ic_values = list(ic_scores.values())
+            if not ic_values:
+                return 5.0
+            
+            if adaptive:
+                return self._find_adaptive_threshold_safe(
+                    input_cuis, hierarchy, ic_scores, target_reduction
+                )
+            else:
+                return float(np.percentile(ic_values, ic_percentile))
+        except Exception as e:
+            logger.warning(f"Threshold determination failed: {str(e)}, using default 5.0")
+            return 5.0
+    
     def _semantic_rollup_with_ic_safe(
         self,
         cui_list: List[str],
@@ -352,173 +452,311 @@ class EnhancedCUIReducer:
         ic_scores: Dict[str, float],
         ic_threshold: float
     ) -> List[str]:
+        try:
+            child_to_parents = hierarchy.get('child_to_parents', {})
+            rolled_up = {}
+            
+            for cui in cui_list:
+                try:
+                    # Get ancestors with BFS
+                    ancestors = []
+                    visited = set()
+                    queue = deque([cui])
+                    
+                    while queue and len(visited) < 100:
+                        current = queue.popleft()
+                        if current in visited:
+                            continue
+                        visited.add(current)
+                        
+                        for parent in child_to_parents.get(current, []):
+                            if parent not in visited:
+                                ancestors.append(parent)
+                                queue.append(parent)
+                    
+                    # Find LIA
+                    candidates = [cui] + ancestors
+                    valid = [c for c in candidates if ic_scores.get(c, 0) >= ic_threshold]
+                    
+                    if valid:
+                        rolled_up[cui] = min(valid, key=lambda c: ic_scores.get(c, float('inf')))
+                    else:
+                        rolled_up[cui] = cui
+                        
+                except Exception as e:
+                    logger.debug(f"Rollup failed for {cui}: {str(e)}")
+                    rolled_up[cui] = cui
+            
+            return list(set(rolled_up.values()))
+            
+        except Exception as e:
+            logger.error(f"Semantic rollup failed: {str(e)}")
+            return cui_list
+    
+    from sklearn.metrics.pairwise import cosine_distances
 
-        child_to_parents = hierarchy.get("child_to_parents", {})
-        rolled = {}
-
-        for cui in cui_list:
-            ancestors = []
-            queue = deque([cui])
-            visited = set()
-
-            while queue:
-                cur = queue.popleft()
-                if cur in visited:
-                    continue
-                visited.add(cur)
-                for p in child_to_parents.get(cur, []):
-                    ancestors.append(p)
-                    queue.append(p)
-
-            candidates = [cui] + ancestors
-            valid = [c for c in candidates if ic_scores.get(c, 0) >= ic_threshold]
-
-            rolled[cui] = min(valid, key=lambda x: ic_scores.get(x, float("inf"))) if valid else cui
-
-        return list(set(rolled.values()))
-
-    # ----------------------------
-    # Clustering
-    # ----------------------------
     def _semantic_clustering_safe(
-        self,
-        cui_list: List[str],
-        ic_scores: Dict[str, float],
-        base_similarity_percentile: float = 95.0,
-        base_distance_percentile: float = 25.0
-    ) -> List[str]:
-
+    self,
+    cui_list: List[str],
+    ic_scores: Dict[str, float],
+    similarity_threshold: float = None,  
+    min_intra_cluster_distance: float = 0.25
+) -> List[str]:
+        """
+        Clusters CUIs, then prunes CLOSE CUIs within each cluster
+        while KEEPING far-apart CUIs.
+        Threshold is dynamically set to the 95th percentile of pairwise similarities.
+        """
+    
         if len(cui_list) <= 1:
             return cui_list
-
-        query = f"""
-        SELECT REF_CUI as cui, REF_Embedding as embedding
-        FROM `{self.project_id}.{self.dataset_id}.{self.cui_embeddings_table}`
-        WHERE REF_CUI IN UNNEST(@cuis)
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("cuis", "STRING", cui_list)
-            ]
-        )
-
-        df = self.client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
-        if df.empty:
+    
+        try:
+            logger.info(f"Fetching embeddings for {len(cui_list)} CUIs...")
+    
+            query = f"""
+            SELECT REF_CUI as cui, REF_Embedding as embedding
+            FROM `{self.project_id}.{self.dataset_id}.{self.cui_embeddings_table}`
+            WHERE REF_CUI IN UNNEST(@cuis)
+            """
+    
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("cuis", "STRING", cui_list)
+                ]
+            )
+    
+            df = self.client.query(query, job_config=job_config).result(timeout=60).to_dataframe()
+    
+            if df.empty:
+                logger.warning("No embeddings found, skipping clustering")
+                return cui_list
+    
+            embeddings = np.vstack(df['embedding'].values)
+            cuis = np.array(df['cui'].values)
+    
+            # ---- STEP 1: COMPUTE 95th PERCENTILE THRESHOLD ----
+            sim_matrix = 1 - cosine_distances(embeddings)  # similarity = 1 - distance
+            upper_tri = sim_matrix[np.triu_indices_from(sim_matrix, k=1)]
+            perc95 = np.percentile(upper_tri, 95)
+    
+            logger.info(f"Dynamic similarity threshold (95th percentile): {perc95:.4f}")
+    
+            # ---- STEP 2: COARSE CLUSTERING ----
+            clustering = AgglomerativeClustering(
+                n_clusters=None,
+                distance_threshold=1 - perc95,  # use percentile-based threshold
+                metric='cosine',
+                linkage='average'
+            )
+    
+            labels = clustering.fit_predict(embeddings)
+    
+            # ---- STEP 3: INTRA-CLUSTER DISTANCE FILTERING ----
+            final_cuis = []
+    
+            for cluster_id in np.unique(labels):
+                idx = np.where(labels == cluster_id)[0]
+                cluster_cuis = cuis[idx]
+                cluster_embeddings = embeddings[idx]
+    
+                if len(cluster_cuis) == 1:
+                    final_cuis.append(cluster_cuis[0])
+                    continue
+    
+                dist_matrix = cosine_distances(cluster_embeddings)
+    
+                order = sorted(
+                    range(len(cluster_cuis)),
+                    key=lambda i: ic_scores.get(cluster_cuis[i], 0),
+                    reverse=True
+                )
+    
+                kept = []
+                for i in order:
+                    too_close = any(dist_matrix[i, j] < min_intra_cluster_distance for j in kept)
+                    if not too_close:
+                        kept.append(i)
+    
+                final_cuis.extend(cluster_cuis[kept])
+    
+            logger.info(
+                f"Distance-based clustering reduced {len(cui_list)} → {len(final_cuis)} CUIs"
+            )
+    
+            return list(set(final_cuis))
+    
+        except Exception as e:
+            logger.error(f"Clustering failed: {str(e)}")
             return cui_list
 
-        embeddings = np.vstack(df["embedding"].values)
-        cuis = np.array(df["cui"].values)
 
-        sim = 1 - cosine_distances(embeddings)
-        tri = sim[np.triu_indices_from(sim, k=1)]
-        sim_thr = np.percentile(tri, base_similarity_percentile)
-        dist_thr = 1 - sim_thr
-
-        clustering = AgglomerativeClustering(
-            n_clusters=None,
-            distance_threshold=dist_thr,
-            metric="cosine",
-            linkage="average"
-        )
-        labels = clustering.fit_predict(embeddings)
-
-        final = []
-        for cid in np.unique(labels):
-            idx = np.where(labels == cid)[0]
-            cluster_cuis = cuis[idx]
-            cluster_emb = embeddings[idx]
-
-            if len(cluster_cuis) == 1:
-                final.append(cluster_cuis[0])
-                continue
-
-            dist = cosine_distances(cluster_emb)
-            tri_d = dist[np.triu_indices_from(dist, k=1)]
-            prune_thr = np.percentile(tri_d, base_distance_percentile)
-
-            order = sorted(
-                range(len(cluster_cuis)),
-                key=lambda i: ic_scores.get(cluster_cuis[i], 0),
-                reverse=True
-            )
-
-            kept = []
-            for i in order:
-                if all(dist[i, j] >= prune_thr for j in kept):
-                    kept.append(i)
-
-            final.extend(cluster_cuis[kept])
-
-        return list(set(final))
-
-    # ----------------------------
-    # Misc
-    # ----------------------------
+    
     def get_cui_descriptions(self, cui_list: List[str]) -> Dict[str, str]:
         if not cui_list:
             return {}
-
+        
         uncached = [c for c in cui_list if c not in self._description_cache]
+        
         if uncached:
-            query = f"""
-            SELECT CUI as cui, Definition as description
-            FROM `{self.project_id}.{self.dataset_id}.{self.cui_description_table}`
-            WHERE CUI IN UNNEST(@cuis)
-            """
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ArrayQueryParameter("cuis", "STRING", uncached)
-                ]
-            )
-            df = self.client.query(query, job_config=job_config).result(timeout=30).to_dataframe()
-            self._description_cache.update(dict(zip(df["cui"], df["description"])))
-
-        return {c: self._description_cache.get(c, "N/A") for c in cui_list}
-
+            try:
+                query = f"""
+                SELECT CUI as cui, Definition as description
+                FROM `{self.project_id}.{self.dataset_id}.{self.cui_description_table}`
+                WHERE CUI IN UNNEST(@cuis)
+                
+                """
+                # LIMIT 50000
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ArrayQueryParameter("cuis", "STRING", uncached)
+                    ]
+                )
+                
+                # FIXED: Use timeout in result() method
+                query_job = self.client.query(query, job_config=job_config)
+                df = query_job.result(timeout=30).to_dataframe()
+                new_descriptions = dict(zip(df['cui'], df['description']))
+                self._description_cache.update(new_descriptions)
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch descriptions: {str(e)}")
+        
+        return {cui: self._description_cache.get(cui, "N/A") for cui in cui_list}
+    
     def get_ic_scores(self, cui_list: List[str]) -> Dict[str, float]:
-        return {c: self._ic_scores_cache.get(c, 0.0) for c in cui_list}
-
+        if self._ic_scores_cache is None:
+            return {cui: 0.0 for cui in cui_list}
+        return {cui: self._ic_scores_cache.get(cui, 0.0) for cui in cui_list}
+    
     @staticmethod
-    def _safe_percentage(n, d):
-        return (n / d * 100) if d else 0.0
-
-# ----------------------------
-# Main runner
-# ----------------------------
+    def _safe_percentage(numerator: float, denominator: float) -> float:
+        """Safe percentage calculation"""
+        return (numerator / denominator * 100) if denominator > 0 else 0.0
+    
+    @staticmethod
+    def _create_empty_stats(start_time: float) -> ReductionStats:
+        return ReductionStats(
+            initial_count=0,
+            after_ic_rollup=0,
+            final_count=0,
+            ic_rollup_reduction_pct=0.0,
+            semantic_clustering_reduction_pct=0.0,
+            total_reduction_pct=0.0,
+            processing_time=time.time() - start_time,
+            ic_threshold_used=0.0
+        )
+    
+    @staticmethod
+    def _create_error_stats(initial_count: int, start_time: float, error: str) -> ReductionStats:
+        logger.error(f"Returning original CUIs due to error: {error}")
+        return ReductionStats(
+            initial_count=initial_count,
+            after_ic_rollup=initial_count,
+            final_count=initial_count,
+            ic_rollup_reduction_pct=0.0,
+            semantic_clustering_reduction_pct=0.0,
+            total_reduction_pct=0.0,
+            processing_time=time.time() - start_time,
+            ic_threshold_used=0.0
+        )
+    
+    
+# Main function to use the classes
 def run_cui_reduction(
     texts: List[str],
     project_id: str,
     dataset_id: str,
     api_url: str,
-    **kwargs
-):
-    api = CUIAPIClient(api_url)
-    reducer = EnhancedCUIReducer(project_id, dataset_id)
+    mrrel_table: str = "MRREL",
+    cui_description_table: str = "cui_descriptions",
+    cui_embeddings_table: str = "cui_embeddings",
+    cui_narrower_table: str = "cui_narrower_concepts",
+    target_reduction: float = 0.85,
+    ic_percentile: float = 50.0,
+    semantic_threshold: float = 0.88,
+    use_semantic_clustering: bool = True,
+    adaptive_threshold: bool = False
+) -> Tuple[List[str], Dict[str, str], Optional[ReductionStats]]:
+ 
+    try:
+        # Initialize API client
+        api_client = CUIAPIClient(
+            api_base_url=api_url,
+            timeout=60,
+            top_k=3
+        )
+        
+        # Initialize reducer
+        cui_reducer = EnhancedCUIReducer(
+            project_id=project_id,
+            dataset_id=dataset_id,
+            mrrel_table=mrrel_table,
+            cui_description_table=cui_description_table,
+            cui_embeddings_table=cui_embeddings_table,
+            cui_narrower_table=cui_narrower_table,
+            max_hierarchy_depth=1,
+            query_timeout=300
+        )
+        
+        # Extract CUIs from texts
+        logger.info(f"Extracting CUIs from {len(texts)} text(s)...")
+        initial_cuis = api_client.extract_cuis_batch(texts)
+        
+        if not initial_cuis:
+            logger.warning("No CUIs extracted from texts")
+            return [], {}, None
+        
+         # Filter CUIs to only ICD, SNOMED, and LOINC
+        logger.info(f"Filtering {len(initial_cuis)} CUIs to retain only ICD, SNOMED, and LOINC...")
+        initial_cuis = filter_allowed_cuis(initial_cuis, project_id, dataset_id)
+        # logger.info(f"{len(initial_cuis)} CUIs retained after filtering by ICD/LOINC/SNOMED")
+        
+        if not initial_cuis:
+            logger.warning("No CUIs remain after filtering")
+            return [], [], {}, None
+        
+        # Reduce CUIs
+        start_time = time.time()
+        reduced_cuis, stats = cui_reducer.reduce(
+            list(initial_cuis),
+            target_reduction=target_reduction,
+            ic_percentile=ic_percentile,
+            semantic_threshold=semantic_threshold,
+            use_semantic_clustering=use_semantic_clustering,
+            adaptive_threshold=adaptive_threshold
+        )
+        
+        # Add API call time to stats
+        stats.api_call_time = time.time() - start_time - stats.processing_time
+        
+        # Get descriptions
+        logger.info("Fetching descriptions...")
+        descriptions = cui_reducer.get_cui_descriptions(reduced_cuis)
+        
+        return list(initial_cuis), reduced_cuis, descriptions, stats
+        
+    except Exception as e:
+        logger.error(f"Pipeline error: {str(e)}")
+        return [], {}, None
 
-    cuis = api.extract_cuis_batch(texts)
-    cuis = filter_allowed_cuis(cuis, project_id, dataset_id)
 
-    reduced, stats = reducer.reduce(list(cuis))
-    descriptions = reducer.get_cui_descriptions(reduced)
-
-    return cuis, reduced, descriptions, stats
-
-# ----------------------------
 # Example usage
-# ----------------------------
-if __name__ == "__main__":
-    texts = ["grams"]
-
+if __name__ == "__main__":    
+    
+    texts = ["pharmacotherapy depression type 2 diabetes"]   
     initial_cuis, reduced_cuis, descriptions, stats = run_cui_reduction(
         texts=texts,
         project_id=project_id,
         dataset_id=dataset,
-        api_url=url
+        api_url=url,  
+        mrrel_table=mrrel_table,
+        cui_description_table=cui_desc_table,
+        cui_embeddings_table=embedding_table,
+        cui_narrower_table=descendants_table
     )
-
+    
     if stats:
-        print(
-            f"Reduction complete: "
-            f"{stats.initial_count} → {stats.final_count} "
-            f"({stats.total_reduction_pct:.1f}%)"
-        )
+        print(f"Reduction complete: {stats.initial_count} → {stats.final_count} ({stats.total_reduction_pct:.1f}%)")
+
+
