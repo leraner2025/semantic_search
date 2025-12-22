@@ -1,19 +1,18 @@
 import asyncio
 import aiohttp
 import subprocess
-import networkx as nx
 import re
 import logging
 from pathlib import Path
 import json
-from typing import List, Dict, Any, Optional, Iterable
+from typing import List, Dict, Set, Any, Optional, Iterable
 
 # ---------------- Config ----------------
 URL = url1
 BATCH_SIZE = 50
 MAX_CONCURRENT_REQUESTS = 10
 REQUEST_TIMEOUT = 60
-MAX_RETRIES_PER_CUI = 2  
+MAX_RETRIES_PER_CUI = 2
 OUTPUT_DIR = Path("cui_results")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -65,7 +64,8 @@ class AsyncCUIClient:
             payload["limit_context"] = limit_context
         try:
             async with self.semaphore:
-                async with session.post(f"{self.url}/subnet/", json=payload, headers=self.headers, timeout=REQUEST_TIMEOUT) as resp:
+                async with session.post(f"{self.url}/subnet/", json=payload,
+                                        headers=self.headers, timeout=REQUEST_TIMEOUT) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
                     nodes, edges = data.get("output", ([], []))
@@ -76,7 +76,7 @@ class AsyncCUIClient:
                     return nodes, edges, True
         except Exception as e:
             logger.warning(f"CUI {cui} failed: {e}")
-            return [], [], False  # indicate failure
+            return [], [], False
 
     async def fetch_batch(self, batch: List[str], limit_context: List[str]):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as session:
@@ -91,43 +91,82 @@ class AsyncCUIClient:
                     failed_cuis.extend([c for c in batch if normalize_cui(c) not in nodes])
             return all_nodes, all_edges, failed_cuis
 
+# ---------------- Incremental Ancestors/Descendants ----------------
+def update_ancestors_descendants(batch: List[str],
+                                 parent_map: Dict[str, Set[str]],
+                                 child_map: Dict[str, Set[str]],
+                                 ancestors_map: Dict[str, Set[str]],
+                                 descendants_map: Dict[str, Set[str]]):
+    queue = set(batch)
+    while queue:
+        cui = queue.pop()
+        old_ancestors = ancestors_map.get(cui, set())
+        old_descendants = descendants_map.get(cui, set())
+
+        new_ancestors = set()
+        for p in parent_map.get(cui, []):
+            new_ancestors.add(p)
+            new_ancestors.update(ancestors_map.get(p, set()))
+
+        new_descendants = set()
+        for c in child_map.get(cui, []):
+            new_descendants.add(c)
+            new_descendants.update(descendants_map.get(c, set()))
+
+        if new_ancestors != old_ancestors or new_descendants != old_descendants:
+            ancestors_map[cui] = new_ancestors
+            descendants_map[cui] = new_descendants
+            queue.update(child_map.get(cui, []))
+            queue.update(parent_map.get(cui, []))
+
+    results = {}
+    for cui in batch:
+        n_cui = normalize_cui(cui)
+        if not n_cui:
+            continue
+        results[n_cui] = {
+            "ancestors": sorted(ancestors_map.get(n_cui, set())),
+            "descendants": sorted(descendants_map.get(n_cui, set())),
+            "total_ancestor_count": len(ancestors_map.get(n_cui, set())),
+            "total_descendant_count": len(descendants_map.get(n_cui, set())),
+        }
+    return results
+
 # ---------------- Pipeline ----------------
 async def run_pipeline(target_cuis: List[str], limit_context: Optional[List[str]] = None):
     target_cuis = validate_cui_list(target_cuis)
     limit_context = validate_str_list(limit_context)
+
     client = AsyncCUIClient(URL, HEADERS, MAX_CONCURRENT_REQUESTS)
 
     batches = [target_cuis[i:i+BATCH_SIZE] for i in range(0, len(target_cuis), BATCH_SIZE)]
-    G = nx.DiGraph()
-    final_results: Dict[str, Dict[str, Any]] = {}
     output_file = OUTPUT_DIR / "full_results.json"
 
-    failed_cuis_total = []
+    parent_map: Dict[str, Set[str]] = {}
+    child_map: Dict[str, Set[str]] = {}
+    ancestors_map: Dict[str, Set[str]] = {}
+    descendants_map: Dict[str, Set[str]] = {}
+    results: Dict[str, Dict[str, Any]] = {}
+    failed_cuis_total: List[str] = []
 
     # ---------------- Process batches ----------------
     for batch_index, batch in enumerate(batches):
         nodes, edges, failed_cuis = await client.fetch_batch(batch, limit_context)
-        G.add_nodes_from(nodes)
-        G.add_edges_from(edges)
         failed_cuis_total.extend(failed_cuis)
 
-        # Incremental ancestors & descendants
-        for cui in batch:
-            n_cui = normalize_cui(cui)
-            if not n_cui:
-                continue
-            ancestors = nx.ancestors(G, n_cui) or {n_cui}
-            descendants = nx.descendants(G, n_cui) or {n_cui}
-            final_results[n_cui] = {
-                "ancestors": sorted(ancestors),
-                "descendants": sorted(descendants),
-                "total_ancestor_count": len(ancestors),
-                "total_descendant_count": len(descendants),
-            }
+        # update parent/child maps
+        for parent, child in edges:
+            child_map.setdefault(parent, set()).add(child)
+            parent_map.setdefault(child, set()).add(parent)
 
-        # Save progress
+        # incremental update
+        batch_results = update_ancestors_descendants(batch, parent_map, child_map,
+                                                     ancestors_map, descendants_map)
+        results.update(batch_results)
+
+        # save progress
         with open(output_file, "w") as f:
-            json.dump(final_results, f)
+            json.dump(results, f)
         logger.info(f"Saved results after batch {batch_index+1} ({batch[0]}-{batch[-1]})")
 
     # ---------------- Retry failed CUIs ----------------
@@ -135,30 +174,26 @@ async def run_pipeline(target_cuis: List[str], limit_context: Optional[List[str]
         if not failed_cuis_total:
             break
         logger.info(f"Retry attempt {retry+1} for {len(failed_cuis_total)} failed CUIs")
-        new_failed = []
-        batches = [failed_cuis_total[i:i+BATCH_SIZE] for i in range(0, len(failed_cuis_total), BATCH_SIZE)]
+        new_failed: List[str] = []
+        retry_batches = [failed_cuis_total[i:i+BATCH_SIZE] for i in range(0, len(failed_cuis_total), BATCH_SIZE)]
         failed_cuis_total = []
-        for batch in batches:
+
+        for batch in retry_batches:
             nodes, edges, failed_cuis = await client.fetch_batch(batch, limit_context)
-            G.add_nodes_from(nodes)
-            G.add_edges_from(edges)
             failed_cuis_total.extend(failed_cuis)
-            # Update incremental results
-            for cui in batch:
-                n_cui = normalize_cui(cui)
-                if not n_cui:
-                    continue
-                ancestors = nx.ancestors(G, n_cui) or {n_cui}
-                descendants = nx.descendants(G, n_cui) or {n_cui}
-                final_results[n_cui] = {
-                    "ancestors": sorted(ancestors),
-                    "descendants": sorted(descendants),
-                    "total_ancestor_count": len(ancestors),
-                    "total_descendant_count": len(descendants),
-                }
-            # Save after each retry batch
+
+            for parent, child in edges:
+                child_map.setdefault(parent, set()).add(child)
+                parent_map.setdefault(child, set()).add(parent)
+
+            batch_results = update_ancestors_descendants(batch, parent_map, child_map,
+                                                         ancestors_map, descendants_map)
+            results.update(batch_results)
+
+            # save after retry batch
             with open(output_file, "w") as f:
-                json.dump(final_results, f)
+                json.dump(results, f)
+
         if failed_cuis_total:
             logger.warning(f"After retry {retry+1}, {len(failed_cuis_total)} CUIs still failed")
 
@@ -181,10 +216,11 @@ async def main():
                   'C1820734', 'C1820735', 'C1820736', 'C2711893', 'C3714634', 'C4716274', 'C5234945', 'C5699729', 'C5788868', 
                   'C5788869', 'C5788870', 'C5788871', 'C5788908', 'C5788909', 'C5788910', 'C5788911', 'C5788912', 'C5788913', 'C5788914',
                   'C5788915', 'C5788916', 'C5788917', 'C5788918', 'C5788919', 'C5788920', 'C5788921', 'C5788922', 'C5788923', 'C5788924',
-                  'C5788925', 'C5788926', 'C5788927', 'C5788928', 'C5788929', 'C5788930', 'C5817380'] 
+                  'C5788925', 'C5788926', 'C5788927', 'C5788928', 'C5788929', 'C5788930', 'C5817380']  # add all 30k+ CUIs
     limit_context = ['LNC.Empty', 'SNOMEDCT_US.Empty', 'SNOMEDCT_US.isa',
-        'ICD10.Empty', 'ICD10AM.Empty', 'ICD10CM.Empty',
-        'ICD10PCS.Empty', 'CCSR_ICD10PCS.Empty']
+                     'ICD10.Empty', 'ICD10AM.Empty', 'ICD10CM.Empty',
+                     'ICD10PCS.Empty', 'CCSR_ICD10PCS.Empty']
     await run_pipeline(target_cuis, limit_context)
 
+# Run
 await main()
