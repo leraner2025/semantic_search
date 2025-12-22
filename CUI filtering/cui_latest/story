@@ -1,0 +1,45 @@
+System translates nature and sub-nature terms from outside document metadata into the correct CUIs using the canonical CUI reference table and vector similarity.
+
+Free-text strings (including multi-word, sentence fragments, and metadata labels) are evaluated for potential CUI matches.
+
+Supports language variations including:
+
+Synonyms
+
+Abbreviations
+
+Misspellings or near-match text
+
+Hyphenation and formatting variances
+
+Source/facility-specific taxonomy
+
+Nested expressions (e.g., “post-op wound care instructions”)
+
+Mapping supports complex relationships:
+
+One term → multiple CUIs
+
+Multiple terms → one CUI
+
+Confidence scoring and thresholding
+
+If no mapping meets minimum threshold, the system flags the term for manual mapping and stores it for future semantic learning.
+
+Translated CUIs output in a standardized format consumable by downstream workflow (vector generation, clustering, search index, summarization).
+
+The system logs:
+
+Term processed
+
+CUI(s) mapped
+
+Confidence score
+
+Method used (rule-based / vector-based / hybrid)
+
+Version of canonical CUI table used
+
+Historical unmapped terms can be reprocessed after new or revised CUI definitions are ingested.
+
+UT to be covered and documented
