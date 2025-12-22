@@ -225,79 +225,54 @@ class EnhancedCUIReducer:
         input_cuis: List[str],
         target_reduction: float = 0.85,
         ic_threshold: Optional[float] = None,
-        ic_percentile: float = 50.0,
+        ic_percentile: float = 50.0,        # kept, ignored
         semantic_threshold: float = 0.88,
         use_semantic_clustering: bool = True,
-        adaptive_threshold: bool = False
+        adaptive_threshold: bool = False    # kept, ignored
     ) -> Tuple[List[str], ReductionStats]:
+
         start_time = time.time()
+        input_cuis = list(set(input_cuis))
         initial_count = len(input_cuis)
-        
-        if initial_count == 0:
-            logger.warning("Empty input CUI list")
-            return [], self._create_empty_stats(start_time)
-        
-        # Remove duplicates
-        input_cuis = list(set(str(c).strip() for c in input_cuis if c and str(c).strip()))
-        initial_count = len(input_cuis)
-        
-        # logger.info(f"Starting reduction: {initial_count} CUIs → target {target_reduction*100:.1f}%")
-        
-        try:
-            # Build hierarchy
-            hierarchy = self._build_hierarchy_safe(input_cuis)
-            ic_scores = self._compute_ic_scores_safe(hierarchy)
-            
-            # Determine IC threshold
-            ic_threshold = self._determine_threshold(
-                ic_scores, ic_threshold, ic_percentile, 
-                adaptive_threshold, input_cuis, hierarchy, target_reduction
-            )
-            
-            # Stage 1: IC-based rollup
-            rolled_up_cuis = self._semantic_rollup_with_ic_safe(
-                input_cuis, hierarchy, ic_scores, ic_threshold
-            )
-            after_rollup = len(rolled_up_cuis)
-            rollup_reduction = self._safe_percentage(initial_count - after_rollup, initial_count)
-            
-            logger.info(f"rolled_up_cuis complete: {after_rollup} CUIs ({rollup_reduction:.1f}% reduction)")
-            
-            # Stage 2: Semantic clustering
-            clustering_reduction = 0.0
-            if use_semantic_clustering and rollup_reduction < target_reduction * 100:
-                final_cuis = self._semantic_clustering_safe(
-                    rolled_up_cuis, ic_scores, semantic_threshold
-                )
-                final_count = len(final_cuis)
-                clustering_reduction = self._safe_percentage(after_rollup - final_count, initial_count)
-                logger.info(f"Semantic clustering complete: {final_count} CUIs ({clustering_reduction:.1f}% additional)")
-            else:
-                final_cuis = rolled_up_cuis
-                final_count = after_rollup
-            
-            # Calculate stats
-            total_reduction = self._safe_percentage(initial_count - final_count, initial_count)
-            processing_time = time.time() - start_time
-            
-            stats = ReductionStats(
-                initial_count=initial_count,
-                after_ic_rollup=after_rollup,
-                final_count=final_count,
-                ic_rollup_reduction_pct=rollup_reduction,
-                semantic_clustering_reduction_pct=clustering_reduction,
-                total_reduction_pct=total_reduction,
-                processing_time=processing_time,
-                ic_threshold_used=ic_threshold,
-                hierarchy_size=len(hierarchy.get('all_cuis', set()))
-            )
-            
-            logger.info(f" Reduction complete: {initial_count} → {final_count} ({total_reduction:.1f}%)")
-            return final_cuis, stats
-            
-        except Exception as e:
-            logger.error(f"Critical error in reduction pipeline: {str(e)}")
-            return input_cuis, self._create_error_stats(initial_count, start_time, str(e))
+
+        hierarchy = self._build_hierarchy_safe(input_cuis)
+        ic_scores = self._compute_ic_scores_safe(hierarchy)
+
+        # MEDIAN IC THRESHOLD ONLY
+        if ic_threshold is None:
+            ic_threshold = float(np.median(list(ic_scores.values())))
+            logger.info(f"Using MEDIAN IC threshold: {ic_threshold:.3f}")
+
+        rolled_up = self._semantic_rollup_with_ic_safe(
+            input_cuis, hierarchy, ic_scores, ic_threshold
+        )
+        after_rollup = len(rolled_up)
+
+        final_cuis = rolled_up
+        if use_semantic_clustering:
+            final_cuis = self._semantic_clustering_safe(rolled_up, ic_scores)
+
+        final_count = len(final_cuis)
+
+        stats = ReductionStats(
+            initial_count=initial_count,
+            after_ic_rollup=after_rollup,
+            final_count=final_count,
+            ic_rollup_reduction_pct=self._safe_percentage(
+                initial_count - after_rollup, initial_count
+            ),
+            semantic_clustering_reduction_pct=self._safe_percentage(
+                after_rollup - final_count, initial_count
+            ),
+            total_reduction_pct=self._safe_percentage(
+                initial_count - final_count, initial_count
+            ),
+            processing_time=time.time() - start_time,
+            ic_threshold_used=ic_threshold,
+            hierarchy_size=len(hierarchy.get("all_cuis", []))
+        )
+
+        return final_cuis, stats
     
     def _build_hierarchy_safe(self, relevant_cuis: List[str]) -> Dict:
         if self._hierarchy_cache is not None:
@@ -615,36 +590,7 @@ class EnhancedCUIReducer:
         logger.error(f"Clustering failed: {str(e)}")
         return cui_list
 
-    def _find_adaptive_threshold_safe(
-        self,
-        cui_list: List[str],
-        hierarchy: Dict,
-        ic_scores: Dict[str, float],
-        target_reduction: float
-    ) -> float:
-        try:
-            ic_values = sorted(ic_scores.values())
-            if not ic_values:
-                return 5.0
-            
-            for percentile in [50, 40, 30, 25, 20, 15, 10]:
-                try:
-                    threshold = float(np.percentile(ic_values, percentile))
-                    rolled_up = self._semantic_rollup_with_ic_safe(
-                        cui_list, hierarchy, ic_scores, threshold
-                    )
-                    reduction = 1 - len(rolled_up) / len(cui_list)
-                    
-                    if reduction >= target_reduction * 0.9:
-                        logger.info(f"Adaptive threshold: {threshold:.3f} (p{percentile})")
-                        return threshold
-                except Exception:
-                    continue
-            
-            return float(np.percentile(ic_values, 10))
-        except Exception as e:
-            logger.warning(f"Adaptive threshold failed: {str(e)}")
-            return 5.0
+
     
     def get_cui_descriptions(self, cui_list: List[str]) -> Dict[str, str]:
         if not cui_list:
