@@ -194,32 +194,8 @@ class EnhancedCUIReducer:
         self._ic_scores_cache = None
         self._description_cache = {}
         
-        # logger.info(f"Initialized CUIReducer for ") 
-        
-    def filter_allowed_cuis(cuis: Set[str], project_id: str, dataset_id: str) -> List[str]:       
-        if not cuis:
-            return []
-
-        try:
-            client = bigquery.Client(project=project_id)
-            query = f"""
-            SELECT DISTINCT CUI
-            FROM `{project_id}.{dataset_id}.MRCONSO`
-            WHERE CUI IN UNNEST(@cuis)
-              AND SAB IN ('ICD10', 'ICD9', 'SNOMEDCT_US', 'LOINC')
-            """
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ArrayQueryParameter("cuis", "STRING", list(cuis))]
-            )
-            query_job = client.query(query, job_config=job_config)
-            df = query_job.result(timeout=60).to_dataframe()
-            allowed_cuis = df['CUI'].tolist()
-            logger.info(f"{len(allowed_cuis)} CUIs allowed after SAB filtering")
-            return allowed_cuis
-        except Exception as e:
-            logger.error(f"Failed to filter CUIs by SAB: {str(e)}")
-            return []
-    
+        # logger.info(f"Initialized CUIReducer for ")         
+       
     def reduce(
         self,
         input_cuis: List[str],
@@ -758,5 +734,3 @@ if __name__ == "__main__":
     
     if stats:
         print(f"Reduction complete: {stats.initial_count} → {stats.final_count} ({stats.total_reduction_pct:.1f}%)")
-
-
