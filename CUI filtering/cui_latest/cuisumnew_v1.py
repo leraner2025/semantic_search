@@ -469,7 +469,7 @@ class EnhancedCUIReducer:
             self._auth_expiry = now + 3300
             return self._auth_token
 
-    # --------------------------
+     # --------------------------
     # Utilities
     # --------------------------
     @staticmethod
@@ -480,3 +480,36 @@ class EnhancedCUIReducer:
     @staticmethod
     def _safe_percentage(numerator: float, denominator: float) -> float:
         return (numerator / denominator * 100) if denominator else 0.0
+
+# --------------------------
+# Main
+# --------------------------
+if __name__ == "__main__":
+    # Fill in your variables
+    project_id = project_id
+    dataset_id = dataset
+    api_url = url
+    subnet_api_url = url1
+    cui_desc_table = cui_desc_table
+    embedding_table = embedding_table
+    descendants_table = descendants_table
+
+    texts = ["pharmacotherapy depression type 2 diabetes"] 
+    api_client = CUIAPIClient(api_base_url=api_url)
+    extracted_cuis = api_client.extract_cuis_batch(texts)
+
+    filtered_cuis = filter_allowed_cuis(extracted_cuis, project_id, dataset_id)
+
+    reducer = EnhancedCUIReducer(
+        project_id,
+        dataset_id,
+        subnet_api_url=subnet_api_url,
+        cui_description_table=cui_desc_table,
+        cui_embeddings_table=embedding_table,
+        cui_narrower_table=descendants_table
+    )
+
+    final_cuis, stats = reducer.reduce(filtered_cuis)
+
+    logger.info(f"Final CUIs ({len(final_cuis)}): {final_cuis}")
+    logger.info(f"Reduction Stats: {stats.to_dict()}")
