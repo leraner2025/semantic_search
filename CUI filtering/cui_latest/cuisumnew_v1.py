@@ -512,4 +512,4 @@ if __name__ == "__main__":
     final_cuis, stats = reducer.reduce(filtered_cuis)
 
     logger.info(f"Final CUIs ({len(final_cuis)}): {final_cuis}")
-    logger.info(f"Reduction Stats: {stats.to_dict()}")
+    logger.info(f"Reduction Stats: {stats.to_dict()}") 
