@@ -14,9 +14,9 @@ import hashlib
 
 # ---------------- Config ----------------
 URL = url1
-BATCH_SIZE = 100  # Increased for better throughput
-MAX_CONCURRENT_REQUESTS = 20  # Increased concurrency
-REQUEST_TIMEOUT = 120  # Increased timeout for larger batches
+BATCH_SIZE = 100  
+MAX_CONCURRENT_REQUESTS = 20  
+REQUEST_TIMEOUT = 120 
 MAX_RETRIES_PER_CUI = 3
 OUTPUT_DIR = Path("cui_results")
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -603,7 +603,7 @@ class CUIHierarchyService:
 async def main():
     # Your CUI list
     target_cuis = [
-        'C0003261', 'C0003264', 'C0003313', # ... add all your CUIs
+        'C0003261', 'C0003264', 'C0003313'
     ]
     
     limit_context = [
@@ -618,13 +618,4 @@ async def main():
     # Example: Use the service for quick lookups
     service = CUIHierarchyService()
     
-    # # Example queries
-    # cui =  "C0003261"
-    # info = service.get_hierarchy_info(cui)
-    # print(f"Hierarchy info for {cui}:")
-    # print(f"  Ancestors: {info['total_ancestor_count']}")
-    # print(f"  Descendants: {info['total_descendant_count']}")
-    # print(f"  Depth: {info['depth']}")
-    # print(f"  Is leaf: {info['is_leaf']}")
-
 await main()
