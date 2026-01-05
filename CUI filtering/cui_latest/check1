@@ -1,0 +1,15 @@
+Groups by semantic type
+
+Builds hierarchy
+
+Computes Information Content (IC)
+
+Filters low-value CUIs
+
+ungroup, delete any duplicates cuis
+
+Fetches embeddings
+
+Clusters semantically similar CUIs
+
+Selects diverse representatives
