@@ -111,6 +111,17 @@ def filter_allowed_cuis(cuis: Set[str], project_id: str, dataset_id: str) -> Lis
 
 
 # CUI API
+def normalize_cui(cui: str) -> Optional[str]:
+    """
+    Normalize CUIs by removing hyphens/underscores and enforcing standard format.
+    Example: 'C1234567-01' -> 'C1234567', 'C1234567_02' -> 'C1234567'
+    """
+    if not cui:
+        return None
+    cui = str(cui).strip()
+    cui = cui.replace("-", "").replace("_", "")
+    m = re.match(r"^(C\d{7})", cui)
+    return m.group(1) if m else None
 
 class CUIAPIClient:
 
@@ -158,7 +169,10 @@ class CUIAPIClient:
             for text in texts:
                 cuis = data.get(text, [])
                 if isinstance(cuis, list):
-                    all_cuis.update(str(c) for c in cuis if c)
+                    for c in cuis:
+                        norm = normalize_cui(c)
+                        if norm:
+                            all_cuis.add(norm)  # deduplication happens automatically with set
             logger.info(f"Extracted {len(all_cuis)} unique CUIs from {len(texts)} texts")
             return all_cuis
         except Exception as e:
