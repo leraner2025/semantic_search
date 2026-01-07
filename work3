@@ -1,6 +1,0 @@
-Previous the capability team developed a tree-based logic to reduce the number of CUIS originally extracted from a note, so that the note can be represented by a smaller of CUIS, rather than a large number of CUIS that have overlap semantics. This story focuses on implementing this logic into a module(s) that:
-Takes in a list of CUIS
-Outputs a smaller list of CUIS
-
-Dev Notes:
-Maybe operate at the block level
