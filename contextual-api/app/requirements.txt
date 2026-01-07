@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-google-cloud-bigquery
-google-cloud-bigquery-storage
-vertexai
-numpy
-requests
