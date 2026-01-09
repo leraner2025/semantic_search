@@ -1,42 +1,12 @@
-import json
-import re
-from datetime import datetime
-from typing import Dict, Any, List
-from google.cloud import aiplatform
-from vertexai.generative_models import GenerativeModel
+Intent
+ ├── intent_title
+ ├── description
+ ├── nature                    ← primary informational role
+ ├── sub_natures[]             ← constituent conceptual components and sub set of Nature
+ │    ├── category_path        ← flattened, ordered hierarchy (canonical vocabulary) which is a subset of nature/sub nature
+ │    ├── atomic_concepts[]    ← smallest ontology-mappable units in all levels
+ └── final_queries[]           ← derived from all the above , espceuially from atomic concepts
 
-
-QUERY_EXPANSION_PROMPT = """
-You are an expert medical AI assistant specializing in clinical query expansion.
-
-TASK: Expand the user's query into a comprehensive, detailed clinical description.
-
-INSTRUCTIONS:
-1. Expand ALL medical abbreviations to full terms (e.g., HTN → Hypertension, DM → Diabetes Mellitus, SOB → Shortness of Breath)
-2. Clarify vague medical terms with specific clinical language
-3. Add relevant medical context based on standard clinical practice
-4. Identify implicit clinical concepts that should be explicit
-5. DO NOT add assumptions beyond reasonable clinical interpretation
-6. DO NOT include action verbs like "analyze", "review", "check" unless in original query
-7. DO NOT hallucinate information not implied by the query
-8. Maintain the original query's intent and scope
-9.Make sure the Temporal accept is relevant to the Query context
-
-EXAMPLES:
-- "Pt with DM" → "Patient with Diabetes Mellitus"
-- "Check vitals" → "Vital signs measurement including blood pressure, heart rate, temperature, respiratory rate, oxygen saturation"
-- "Family hx of heart disease" → "Cardiovascular disease in family including coronary artery disease, myocardial infarction, heart failure"
-- "SOB on exertion" → "Shortness of breath on exertion"
-
-Return ONLY valid JSON (no markdown, no explanation):
-{{
-  "expanded_query": "comprehensive expanded clinical description",
-  "abbreviations_expanded": ["list of abbreviations that were expanded"],
-  "concepts_added": ["list of medical concepts that were made explicit"]
-}}
-
-User Input: {query}
-"""
 
 INTENT_EXTRACTION_PROMPT = """
 You are a clinical intent extraction engine specialized in medical information retrieval, ontology alignment, and hierarchical taxonomy construction.
@@ -104,7 +74,7 @@ Each intent MUST include:
 
 2. description
 - Provide a clear, comprehensive, and detailed clinical explanation of the information.
-- Write as a direct clinical statement without meta-phrases or self-referential language (e.g., avoid “this intent is,” “the purpose is,” or similar constructions).
+- Write as a direct clinical statement without meta-phrases or self-referential language e.g., avoid “this intent”, “the purpose is” or similar constructions.
 - Describe the clinical concept itself, including what the information represents, how it is clinically interpreted, and its relevance to patient care or decision-making.
 - Focus on the clinical attributes and significance of the concept, independent of any intent, query, or extraction framework.
 
@@ -146,8 +116,7 @@ Each sub_nature MUST follow this structure:
 
 {{
   "category": "Broad Clinical Dimension >> Specific Clinical Axis >> Focused Classification",
-  "elements": ["atomic clinical concepts"],
-  "entities": ["ontology-aligned medical entity types"]
+  "elements": ["atomic clinical concepts"]
 }}
 
 ====================================================
@@ -160,6 +129,9 @@ It should reflect:
 - The axis of clinical interpretation (e.g., anatomy, time, severity, function, perception)
 - Progressive narrowing from general to specific
 - How clinicians mentally organize this information
+- tie up with expanded query within the category 
+- Related subcategories should be grouped under a single parent category whenever clinically meaningful.
+- Avoid duplicate categories — merge elements under an existing category if they belong together.
 
 Examples:
 - Symptom Characteristics >> Temporal Pattern >> Onset
@@ -176,6 +148,8 @@ Elements contain the most granular, clinically atomic concepts that are:
 - Directly documentable
 - Not further decomposable
 - Free of narrative or contextual wording
+- Do not create elements that duplicate meaning at different levels. Each hierarchical step should add a distinct clinical distinction; merge or remove elements that restate the same concept using different wording;validate acrossing categories
+
 
 Elements represent clinical facts or descriptors, not phrases or categories.
 
@@ -185,21 +159,6 @@ Examples:
 - sleep disruption
 - impaired concentration
 - concern for appendicitis
-
-====================================================
-ENTITIES DEFINITION
-====================================================
-
-Entities describe the medical concept type represented by the elements and support ontology mapping.
-
-Examples:
-- Symptom
-- TemporalQualifier
-- SeverityDescriptor
-- FunctionalStatus
-- ClinicalFinding
-- PatientBelief
-- SuspectedDiagnosis
 
 ====================================================
 FINAL_QUERIES GENERATION (EXTRACTION-OPTIMIZED)
@@ -278,8 +237,7 @@ RESPONSE FORMAT (JSON ONLY)
       "sub_nature": [
         {{
           "category": "string",
-          "elements": ["string"],
-          "entities": ["string"]
+          "elements": ["string"]          
         }}
       ],
       "final_queries": [
@@ -293,231 +251,3 @@ RESPONSE FORMAT (JSON ONLY)
 User Input: {expanded_query}
 Timestamp: {timestamp}
 """
-
-
-
-# Pipeline
-
-
-class ContextualIntentPipeline:    
-    def __init__(self, project: str, location: str = "us-central1", 
-                 model: str = MODEL_VERSION):
-
-        aiplatform.init(project=project, location=location)
-        self.model = GenerativeModel(model)        
-        
-    def _call_model(self, prompt: str, temperature: float = 0.0, max_tokens: int = 8096) -> str:
-
-        try:
-            # Reset session to avoid context carryover
-            if hasattr(self.model, "session") and self.model.session is not None:
-                self.model.session.reset()
-            
-            response = self.model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.0,
-                    "max_output_tokens": max_tokens,
-                    "top_p": 1.0,
-                    "top_k": 1,
-                    "seed":43
-                }
-            )
-            return response.text.strip()
-        except Exception as e:
-            print(f"Error calling model: {str(e)}")
-            return "{}"
-    
-    def _safe_json(self, text: str) -> Dict[str, Any]:
-
-        # Remove markdown code blocks if present
-        text = re.sub(r'```json\s*', '', text)
-        text = re.sub(r'```\s*', '', text)
-        text = text.strip()
-        
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(0))
-                except:
-                    pass
-            
-            match = re.search(r'\[.*\]', text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(0))
-                except:
-                    pass
-            
-            print(f"Failed to parse JSON from response: {text[:200]}")
-            return {}
-    
-    def _validate_json_structure(self, data: Dict, required_keys: List[str]) -> bool:
-
-        return all(key in data for key in required_keys)
-    
-    # STEP 1: Query Expansion
-    
-    def expand_query(self, query: str) -> Dict[str, Any]:
-
-        prompt = QUERY_EXPANSION_PROMPT.format(query=query)
-        raw_response = self._call_model(prompt)
-        data = self._safe_json(raw_response)
-        
-        if not self._validate_json_structure(data, ["expanded_query"]):
-            # Fallback to original query if expansion fails
-            return {
-                "expanded_query": query,
-                "abbreviations_expanded": [],
-                "concepts_added": []
-            }
-        
-        return {
-            "expanded_query": data.get("expanded_query", query),
-            "abbreviations_expanded": data.get("abbreviations_expanded", []),
-            "concepts_added": data.get("concepts_added", [])
-        }
-    
-    # STEP 2: Intent Extraction
-    
-    def extract_intents(self, original_query: str, expanded_query: str) -> Dict[str, Any]:
-
-        prompt = INTENT_EXTRACTION_PROMPT.format(
-            original_query=original_query,
-            expanded_query=expanded_query,
-            timestamp=datetime.utcnow().isoformat()
-        )
-        
-        # Use higher token limit for complex queries
-        raw_response = self._call_model(prompt, max_tokens=8096)
-        data = self._safe_json(raw_response)
-        
-        # Check if query was rejected as non-clinical
-        if not data.get("is_clinical", True):
-            return {
-                "intents": [],
-                "total_intents_detected": 0,
-                "is_clinical": False,
-                "rejected_reason": data.get("reason", "Query is not clinical"),
-                "original_query": original_query,
-                "expanded_query": expanded_query
-            }
-        
-        if not self._validate_json_structure(data, ["intents"]):
-            return {
-                "intents": [],
-                "total_intents_detected": 0,
-                "error": "Failed to extract intents"
-            }
-        
-        # Validate that all intents have final_queries
-        intents = data.get("intents", [])
-        validated_intents = []
-        
-        for idx, intent in enumerate(intents):
-            if "final_queries" not in intent or not intent["final_queries"]:
-                print(f"  Warning: Intent {idx + 1} '{intent.get('intent_title', 'Unknown')}' has no final_queries. Skipping.")
-                continue
-            
-            # No minimum requirement - let LLM decide based on complexity
-            validated_intents.append(intent)
-        
-        return {
-            "intents": validated_intents,
-            "total_intents_detected": data.get("total_intents_detected", len(validated_intents)),
-            "is_clinical": True,
-            "original_query": data.get("original_query", original_query),
-            "expanded_query": data.get("expanded_query", expanded_query)
-        }    
-          
-    
-    # Pipeline exec
-    
-    def run(self, query: str, verbose: bool = False) -> Dict[str, Any]:
-
-        start_time = datetime.utcnow()
-        
-        if verbose:
-            print(f"Original Query: {query}")
-        
-        # Step 1: Query Expansion
-        expansion_result = self.expand_query(query)
-        expanded_query = expansion_result["expanded_query"]
-        
-        if verbose:
-            print(f"Expanded Query: {expanded_query}")
-        
-        # Step 2: Intent Extraction
-        intent_result = self.extract_intents(query, expanded_query)
-        
-       
-        if not intent_result.get("is_clinical", True):
-            processing_time = (datetime.utcnow() - start_time).total_seconds()
-            
-            if verbose:
-                print(f"Status: NON-CLINICAL (rejected)")
-                print(f"Processing Time: {processing_time:.2f}s\n")
-            
-            return {
-                "original_query": query,
-                "expanded_query": expanded_query,
-                "intents": [],
-                "is_clinical": False,
-                "rejected_reason": intent_result.get("rejected_reason", "Query is not clinical"),
-                "timestamp": datetime.utcnow().isoformat(),
-                "processing_time_seconds": processing_time
-            }
-        
-        intents = intent_result.get("intents", [])        
-        
-        # Calculate statistics
-        total_queries = sum(len(intent.get('final_queries', [])) for intent in intents)
-        total_sub_natures = sum(len(intent.get('sub_nature', [])) for intent in intents)
-        processing_time = (datetime.utcnow() - start_time).total_seconds()
-        
-        if verbose:
-            print(f"Status: CLINICAL")
-            print(f"Intents: {len(intents)} | Sub-natures: {total_sub_natures} | Queries: {total_queries}")
-            print(f"Processing Time: {processing_time:.2f}s\n")
-        
-        return {
-            "original_query": query,
-            "expanded_query": expanded_query,
-            "abbreviations_expanded": expansion_result.get("abbreviations_expanded", []),
-            "concepts_added": expansion_result.get("concepts_added", []),
-            "intents": intents,
-            "is_clinical": True,
-            "timestamp": datetime.utcnow().isoformat(),
-            "processing_time_seconds": processing_time
-            }
-        
-
-if __name__ == "__main__":
-    PROJECT_ID = PROJECT_ID    
-    pipeline = ContextualIntentPipeline(
-        project=PROJECT_ID,
-        location="us-central1",
-        model=MODEL_VERSION
-
-    )
-    
-# Test queries
-    test_queries = [
-        "I am managing patient appointment requests submitted through an online portal. Patients describe their health concerns and health needs on the application forms. I need to list their primary health concerns, secondary health concerns, and their needs from the submitted texts."
-    ]
-    
-    for idx, query in enumerate(test_queries, 1):
-        print(f"\n{'='*80}")
-        print(f"Query {idx}/{len(test_queries)}")
-        print(f"{'='*80}")
-        
-        result = pipeline.run(query, verbose=True)
-        
-        output_filename = f"query_result_{idx}.json"
-        with open(output_filename, 'w') as f:
-            json.dump(result, f, indent=2)
-        
-        print(f"Saved to: {output_filename}")
